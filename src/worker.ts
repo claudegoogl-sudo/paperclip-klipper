@@ -58,7 +58,13 @@ export interface CreateKlipperWorkerOptions {
 }
 
 export interface KlipperWorker {
-  client: MoonrakerClient;
+  /**
+   * MoonrakerClient instance, or `null` when the worker started without
+   * `moonrakerBaseUrl` set. Tool / action / data handlers must gate on
+   * client presence and surface `prerequisite_missing` (mirroring the CAD
+   * plugin pattern — see PLA-502/503).
+   */
+  client: MoonrakerClient | null;
   config: KlipperConfig;
 }
 
@@ -75,10 +81,17 @@ export async function createKlipperWorker(
   const config = rawConfig as Partial<KlipperConfig>;
   const baseUrl = config.moonrakerBaseUrl;
   if (!baseUrl) {
-    ctx.logger.error("paperclip-klipper missing required config", {
-      missing: "moonrakerBaseUrl",
-    });
-    throw new Error("paperclip-klipper requires `moonrakerBaseUrl` in config");
+    // Permissive init (PLA-502/503): worker initializes without
+    // `moonrakerBaseUrl` so the host sees a healthy worker, `plugin install`
+    // exits 0, and the page slot mounts. Tool / action / data handlers gate
+    // on config presence at call time and return `prerequisite_missing`.
+    // Mirrors the CAD plugin pattern.
+    ctx.logger.warn(
+      "paperclip-klipper starting without moonrakerBaseUrl — tool calls will return prerequisite_missing until config is set",
+      { pluginId: "platform.klipper" },
+    );
+    registerRpcSurface(ctx, { config: config as KlipperConfig, client: null });
+    return { client: null, config: config as KlipperConfig };
   }
 
   ctx.logger.info("paperclip-klipper worker setup", {
