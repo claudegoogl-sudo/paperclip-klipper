@@ -37,6 +37,22 @@ export function ConnectionBanner({ connection, onReconnected }: ConnectionBanner
   // design — see UX spec §1.
   if (state === "idle" || state === "connected") return null;
 
+  // Needs-config / unconfigured — PLA-502 follow-up. Until PLA-502 lands
+  // the exact signal shape, the Page also performs a top-level short-circuit
+  // for the full-replace card; this branch covers the "preferred" surface
+  // where the worker emits `connection.state === "unconfigured"`.
+  if ((state as string) === "unconfigured") {
+    return (
+      <BannerShell role="status" aria-live="polite" testId="klipper-banner-unconfigured">
+        <StatusBadge label="Set up your Klipper printer" status="warning" />
+        <span style={{ flex: 1, minWidth: 0 }}>
+          Add your Moonraker host URL to start using this page. Configuration is in the plugin's
+          settings.
+        </span>
+      </BannerShell>
+    );
+  }
+
   if (state === "connecting") {
     return (
       <BannerShell role="status" aria-live="polite" testId="klipper-banner-connecting">
