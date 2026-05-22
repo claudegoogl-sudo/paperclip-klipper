@@ -297,11 +297,11 @@ describe("ActivePrint (§6.4 §2)", () => {
     };
   }
 
-  it("renders the empty state with a 'Start a print ↓' CTA in standby", async () => {
+  it("renders the empty state with a 'Start a print ↑' CTA in standby", async () => {
     await renderActive(statusFromStats({ state: "standby" }));
     const empty = screen.getByTestId("klipper-active-empty");
     expect(empty.textContent).toMatch(/No active print/);
-    expect(screen.getByTestId("klipper-active-empty-cta").textContent).toMatch(/Start a print/);
+    expect(screen.getByTestId("klipper-active-empty-cta").textContent).toMatch(/Start a print ↑/);
   });
 
   it("empty-state CTA focuses the file list's first Start button", async () => {

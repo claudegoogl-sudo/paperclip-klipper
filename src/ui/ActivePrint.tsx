@@ -118,7 +118,7 @@ export function ActivePrint({ status, onRefresh }: ActivePrintProps) {
             padding: `${sp(2)} ${sp(3)}`,
           }}
         >
-          Start a print ↓
+          Start a print ↑
         </button>
       </section>
     );
