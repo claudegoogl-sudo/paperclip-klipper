@@ -21,13 +21,19 @@ import type { PaperclipPluginManifestV1 } from "@paperclipai/plugin-sdk";
  *                              phase; real implementations land in 6.5).
  *   - events.subscribe       — subscribe to host events the worker will react
  *                              to in 6.5. Stub handlers only at this phase.
- *   - ui.page.register        — host-mounted `page` slot at
- *                              `/:companyPrefix/printer`. PLA-473 Q1 resolved
- *                              the nav-surface spike to Option 2 (page slot)
- *                              and PLA-480 / §6.4 lands the real four-section
- *                              UI behind it. The capability count stays at
- *                              five — `ui.dashboardWidget.register` was
- *                              swapped out for `ui.page.register`; no net
+ *   - ui.dashboardWidget.register
+ *                            — host-mounted `dashboardWidget` slot. PLA-486
+ *                              swapped the original `page` slot back to a
+ *                              dashboard widget because the v1 host runtime
+ *                              hard-rejects every UI slot type except
+ *                              `dashboardWidget` (`PLUGIN_UI_SLOT_TYPES_V1_SUPPORTED`
+ *                              = ["dashboardWidget"]); PLA-485 chose Option A
+ *                              (v1.0 ships as widget only). PLA-481 batches
+ *                              the host-side `page` slot for v1.1. The full
+ *                              widget UX (connection banner, last-job summary,
+ *                              launcher button) is rescoped to PLA-480. The
+ *                              capability count is unchanged at five — the
+ *                              edit is a single semantic swap, no net
  *                              expansion (governance ticket is still required
  *                              for any future additions).
  */
@@ -47,7 +53,7 @@ const manifest: PaperclipPluginManifestV1 = {
     "secrets.read-ref",
     "agent.tools.register",
     "events.subscribe",
-    "ui.page.register",
+    "ui.dashboardWidget.register",
   ],
 
   entrypoints: {
@@ -170,21 +176,20 @@ const manifest: PaperclipPluginManifestV1 = {
     },
   ],
 
-  // UI slots — PLA-473 Q1 resolved to Option 2 (a host-mounted `page` slot
-  // at `/:companyPrefix/printer`). The four-section UI (connection banner,
-  // recent uploads, file detail, active print) is implemented behind the
-  // `Page` export in `src/ui/index.tsx` per PLA-480 / §6.4.
-  //
-  // routePath is the company-scoped segment — the host resolves it to
-  // `/:companyPrefix/printer` (e.g. `/PLA/printer`).
+  // UI slots — PLA-486 swapped the original `page` slot to `dashboardWidget`
+  // because the host v1 runtime only supports `dashboardWidget`
+  // (PLUGIN_UI_SLOT_TYPES_V1_SUPPORTED). The minimal placeholder rendered by
+  // the `DashboardWidget` export in `src/ui/index.tsx` is enough to satisfy
+  // the install validator; PLA-480 lands the real widget UX (connection
+  // banner, last-job summary, launcher button). A host-side `page` slot
+  // returns in v1.1 via PLA-481.
   ui: {
     slots: [
       {
-        type: "page",
-        id: "klipper-page",
-        displayName: "Printer",
-        exportName: "Page",
-        routePath: "printer",
+        type: "dashboardWidget",
+        id: "klipper-dashboard-widget",
+        displayName: "Klipper",
+        exportName: "DashboardWidget",
       },
     ],
   },

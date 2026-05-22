@@ -35,21 +35,22 @@ describe("paperclip-klipper manifest (PLA-474)", () => {
         "secrets.read-ref",
         "agent.tools.register",
         "events.subscribe",
-        "ui.page.register",
+        "ui.dashboardWidget.register",
       ]),
     );
-    // PLA-480 — capability count must stay at five (issue AC §1). The
-    // PLA-473 Q1 resolution swapped `ui.dashboardWidget.register` for
-    // `ui.page.register`; no net addition.
+    // PLA-486 — capability count stays at five. The original PLA-473 Q1 plan
+    // chose `ui.page.register`, but the v1 host runtime only supports
+    // `dashboardWidget` (PLUGIN_UI_SLOT_TYPES_V1_SUPPORTED), so PLA-485
+    // resolved to ship v1.0 as a widget. The capability set is unchanged in
+    // count — single semantic swap, `ui.page.register` is *not* present.
     expect(manifest.capabilities).toHaveLength(5);
-    expect(manifest.capabilities).not.toContain("ui.dashboardWidget.register");
+    expect(manifest.capabilities).not.toContain("ui.page.register");
     expect(manifest.ui?.slots).toEqual([
       {
-        type: "page",
-        id: "klipper-page",
-        displayName: "Printer",
-        exportName: "Page",
-        routePath: "printer",
+        type: "dashboardWidget",
+        id: "klipper-dashboard-widget",
+        displayName: "Klipper",
+        exportName: "DashboardWidget",
       },
     ]);
     expect(manifest.tools?.map((t) => t.name)).toEqual([

@@ -1,14 +1,15 @@
 // @vitest-environment jsdom
 /**
- * UI interaction tests for the Klipper page (PLA-480 / §6.4).
+ * UI interaction tests for the Klipper plugin.
  *
- * Covers all four sections (connection banner, file list, detail view,
- * active print panel) per AC §5. Data shapes feed in from the PLA-475
- * MockMoonraker fixture — for the file list / metadata shapes we drive a
- * real MoonrakerClient through MockMoonraker so the assertions exercise
- * the same payloads the worker produces in production. SDK hooks are
- * mocked so the component tree never touches the bridge transport (which
- * is a host runtime, not present under vitest).
+ * PLA-486 swapped the orchestrator from a `page` slot's `Page` component to
+ * a minimal `dashboardWidget` slot's `DashboardWidget` placeholder. The
+ * widget smoke test below replaces the old four-section Page orchestrator
+ * test; the section-level component tests (ConnectionBanner, ActivePrint,
+ * FileList, FileDetail) are unchanged — those components stay on disk
+ * because PLA-480 (rescoped, UXDesigner-led) will reuse them for the real
+ * widget UX. SDK hooks are mocked so the component tree never touches the
+ * bridge transport (which is a host runtime, not present under vitest).
  */
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
@@ -106,126 +107,27 @@ afterEach(() => {
   cleanup();
 });
 
-// ── Page orchestrator ────────────────────────────────────────────────────
-describe("Page orchestrator (PLA-480 §6.4)", () => {
-  it("renders all four sections wired to the right RPC keys", async () => {
-    const conn: ConnectionStateSnapshot = { state: "connected", attempts: 0 };
-    const status: MoonrakerStatusSnapshot = {
-      objects: {
-        print_stats: { state: "standby" },
-        extruder: {},
-        heater_bed: {},
-        virtual_sdcard: {},
-        display_status: {},
-      },
-      updatedAt: new Date().toISOString(),
-      connection: conn,
-    };
-    const files: FileListEntry[] = [
-      { path: "benchy.gcode", size: 1024 * 1024, modified: Date.now() / 1000 - 60 },
-    ];
-    setDataMap({ status: { data: status }, files: { data: files }, file_metadata: { data: { filename: "benchy.gcode" } } });
-
-    const { Page } = await import("../../src/ui/index.js");
-    render(<Page context={{
-      companyId: null,
-      companyPrefix: null,
-      projectId: null,
-      entityId: null,
-      entityType: null,
-      userId: null,
-    }} />);
-
-    // Section 1: banner is hidden in `connected` state.
-    expect(screen.queryByTestId("klipper-banner-failed")).toBeNull();
-    expect(screen.queryByTestId("klipper-banner-connecting")).toBeNull();
-    // Section 2: file list shows the row.
-    expect(screen.getByTestId("klipper-files")).toBeTruthy();
-    expect(screen.getByText("benchy.gcode")).toBeTruthy();
-    // Section 4: active panel shows the idle empty state.
-    expect(screen.getByTestId("klipper-active-empty")).toBeTruthy();
-
-    // Stream subscribed to the documented channel.
-    expect(streamFn).toHaveBeenCalledWith("klipper");
-    // All four data keys exercised.
-    const keysSeen = dataFn.mock.calls.map((c) => c[0]);
-    expect(keysSeen).toContain("status");
-    expect(keysSeen).toContain("files");
-    expect(keysSeen).toContain("file_metadata");
-  });
-
-  it("promotes the active print panel above the queue while printing", async () => {
-    const printingStatus: MoonrakerStatusSnapshot = {
-      objects: {
-        print_stats: { state: "printing", filename: "big.gcode", print_duration: 600, info: { current_layer: 10, total_layer: 100 } },
-        extruder: { temperature: 200, target: 210 },
-        heater_bed: { temperature: 60, target: 60 },
-        virtual_sdcard: { progress: 0.25 },
-        display_status: {},
-      },
-      updatedAt: new Date().toISOString(),
-      connection: { state: "connected", attempts: 0 },
-    };
-    setDataMap({
-      status: { data: printingStatus },
-      files: { data: [] as FileListEntry[] },
-    });
-
-    const { Page } = await import("../../src/ui/index.js");
-    const { container } = render(<Page context={{
-      companyId: null,
-      companyPrefix: null,
-      projectId: null,
-      entityId: null,
-      entityType: null,
-      userId: null,
-    }} />);
-
-    // Active panel rendered with the layer/elapsed/eta line.
-    expect(screen.getByTestId("klipper-active")).toBeTruthy();
-    expect(screen.getByTestId("klipper-active-percent").textContent).toBe("25%");
-    expect(screen.getByTestId("klipper-active-layers-eta").textContent).toMatch(/Layer 10 of 100/);
-
-    // Ordering: the `data-testid="klipper-active"` element must appear before
-    // the file-list section in document order so progress/Cancel are above
-    // the fold on mobile.
-    const activeEl = container.querySelector("[data-testid='klipper-active']");
-    const filesEl =
-      container.querySelector("[data-testid='klipper-files']") ??
-      container.querySelector("[data-testid='klipper-files-empty']");
-    expect(activeEl).toBeTruthy();
-    expect(filesEl).toBeTruthy();
-    expect(
-      activeEl!.compareDocumentPosition(filesEl!) & Node.DOCUMENT_POSITION_FOLLOWING,
-    ).toBeTruthy();
-  });
-
-  it("wraps the page in an ErrorBoundary that contains render crashes", async () => {
-    // Force a render error inside one section by handing it bad data shape
-    // that would throw if not defensive — we use the status print_stats
-    // panel which expects an object. The ErrorBoundary should swallow it.
-    const onError = vi.fn();
-    setDataMap({
-      status: { data: { objects: null as unknown as Record<string, Record<string, unknown>>, updatedAt: null, connection: { state: "connected", attempts: 0 } } },
-      files: { data: [] as FileListEntry[] },
-    });
-    const { Page } = await import("../../src/ui/index.js");
-    expect(() =>
-      render(
-        <Page context={{
+// ── DashboardWidget placeholder (PLA-486) ────────────────────────────────
+describe("DashboardWidget placeholder (PLA-486)", () => {
+  it("renders the minimal placeholder bound to the dashboardWidget slot", async () => {
+    const { DashboardWidget } = await import("../../src/ui/index.js");
+    render(
+      <DashboardWidget
+        context={{
           companyId: null,
           companyPrefix: null,
           projectId: null,
           entityId: null,
           entityType: null,
           userId: null,
-        }} />,
-      ),
-    ).not.toThrow();
-    // ErrorBoundary onError only fires on actual thrown render — defensive
-    // code may avoid the throw entirely, which is also fine. The contract
-    // we care about: the call site is wrapped, page didn't crash.
-    expect(onError).not.toHaveBeenCalled();
+        }}
+      />,
+    );
+    expect(screen.getByTestId("klipper-dashboard-widget")).toBeTruthy();
+    expect(screen.getByText(/Klipper/)).toBeTruthy();
+    // Placeholder only — the full widget UX (connection banner, last-job
+    // summary, launcher button) lands in PLA-480, not here.
+    expect(screen.getByText(/PLA-480/)).toBeTruthy();
   });
 });
 
