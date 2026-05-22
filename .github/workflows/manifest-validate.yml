@@ -1,0 +1,50 @@
+name: Plugin manifest validation (release gate)
+
+# PLA-376 — release-time check that runs the host plugin-manifest
+# validator against the built dist/manifest.js BEFORE a tarball can be
+# packed or published. Mirrors the gate at
+# packages/plugins/create-paperclip-plugin/src/index.ts (scaffold).
+
+on:
+  pull_request:
+    paths:
+      - 'src/manifest.ts'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'esbuild.config.mjs'
+      - 'rollup.config.mjs'
+      - 'scripts/validate-manifest.mjs'
+      - 'tests/validate-manifest.spec.ts'
+      - '.github/workflows/manifest-validate.yml'
+  push:
+    branches:
+      - main
+    paths:
+      - 'src/manifest.ts'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'esbuild.config.mjs'
+      - 'rollup.config.mjs'
+      - 'scripts/validate-manifest.mjs'
+      - 'tests/validate-manifest.spec.ts'
+      - '.github/workflows/manifest-validate.yml'
+
+jobs:
+  validate-manifest:
+    name: validate dist/manifest.js against pluginManifestV1Schema
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+      - run: npm ci
+      - name: Build manifest (and worker)
+        run: npm run build
+      - name: Run regression test (PLA-376)
+        run: npx vitest run --config ./vitest.config.ts tests/validate-manifest.spec.ts
+      - name: Validate built manifest
+        run: npm run validate:manifest
