@@ -157,8 +157,8 @@ export function Page(_props: PluginPageProps) {
 
         {/* Order:
             - When printing: §2 (active) promoted above §3 (file list).
-            - When idle: §3 above §2 so the empty-state "Start a print ↓"
-              CTA lands naturally over the list it points to. */}
+            - When idle: §3 above §2 so the empty-state "Start a print ↑"
+              CTA sits beneath the file list its arrow points up at. */}
         {isPrinting ? (
           <>
             <ActivePrint status={status.data} onRefresh={refreshStatus} />
