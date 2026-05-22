@@ -18,6 +18,27 @@ import { KeyValueList, StatusBadge } from "./components.js";
 import type { MoonrakerStatusSnapshot } from "../worker/MoonrakerClient.js";
 import { fontSize, muted, sp, stack, TAP_TARGET_MIN, visuallyHidden } from "./theme.js";
 import { estimateRemainingSeconds, formatDuration, truncateFilename } from "./format.js";
+import { FILE_LIST_ANCHOR_ID } from "./FileList.js";
+
+/**
+ * Empty-state CTA: scroll the file list into view and focus the first row's
+ * Start button so a keyboard / screen-reader user lands in actionable
+ * territory. Honours `prefers-reduced-motion`.
+ */
+function focusFileList() {
+  if (typeof document === "undefined") return;
+  const list = document.getElementById(FILE_LIST_ANCHOR_ID);
+  if (!list) return;
+  const reduced =
+    typeof window !== "undefined" && typeof window.matchMedia === "function"
+      ? window.matchMedia("(prefers-reduced-motion: reduce)").matches
+      : false;
+  list.scrollIntoView({ behavior: reduced ? "auto" : "smooth", block: "start" });
+  const firstStart = list.querySelector<HTMLButtonElement>(
+    '[data-testid="klipper-file-row-start"]',
+  );
+  if (firstStart) firstStart.focus();
+}
 
 /** Active-printer states for which we promote this panel above the queue. */
 export const ACTIVE_PRINT_STATES = new Set(["printing", "paused"]);
@@ -84,9 +105,21 @@ export function ActivePrint({ status, onRefresh }: ActivePrintProps) {
       <section
         aria-label="Active print"
         data-testid="klipper-active-empty"
-        style={{ padding: `${sp(3)} ${sp(3)}`, ...muted }}
+        style={{ ...stack(2), padding: sp(3) }}
       >
-        No active print.
+        <span style={muted}>No active print.</span>
+        <button
+          type="button"
+          onClick={focusFileList}
+          data-testid="klipper-active-empty-cta"
+          style={{
+            alignSelf: "flex-start",
+            minHeight: TAP_TARGET_MIN,
+            padding: `${sp(2)} ${sp(3)}`,
+          }}
+        >
+          Start a print ↓
+        </button>
       </section>
     );
   }

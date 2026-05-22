@@ -1,19 +1,22 @@
 /**
- * Recent uploads / queue — section 2 of the Klipper page UI (PLA-480 / §6.4).
+ * Recent uploads / queue — section 3 of the Klipper page UI (PLA-480 / §6.4).
  *
- * Mobile-first single-column list (not a `<table>`); each row is a single
- * ≥44px tap target that calls `onSelect(file)` to open the detail view.
- * Thumbnails are loaded lazily per row via `usePluginData('file_metadata')`
- * — never `ctx.assets`, never direct `fetch`.
+ * Mobile-first single-column list (not a `<table>`); each row is a `<li>`
+ * with metadata + a trailing inline Start button (≥44px tap target). Per
+ * rev-4 UX delta, thumbnails are deferred to v1.1 — rows are textual +
+ * the `PrinterGlyph` SVG only. `FileDetail` was dropped; Start is inline.
  *
  * Sort: newest first (`modified` desc). No sort UI in v1 (Hick's Law).
  */
-import { useMemo } from "react";
-import { usePluginData } from "@paperclipai/plugin-sdk/ui";
+import { useMemo, useState } from "react";
+import { usePluginAction, usePluginToast } from "@paperclipai/plugin-sdk/ui";
 import { Spinner, StatusBadge } from "./components.js";
-import type { FileListEntry, FileMetadata } from "../worker/MoonrakerClient.js";
+import type { FileListEntry } from "../worker/MoonrakerClient.js";
 import { fontSize, muted, sp, TAP_TARGET_MIN } from "./theme.js";
-import { firstInlineThumbnailDataUrl, formatBytes, formatRelativeTime } from "./format.js";
+import { formatBytes, formatRelativeTime } from "./format.js";
+
+/** Anchor id used by the ActivePrint empty-state "Start a print" CTA. */
+export const FILE_LIST_ANCHOR_ID = "klipper-file-list";
 
 export interface FileListProps {
   /** The file list as returned by `usePluginData('files')`. */
@@ -22,11 +25,11 @@ export interface FileListProps {
   error: { message: string } | null;
   /** Refresh callback for the inline error-state retry button. */
   onRetry?: () => void;
-  /** Open the detail view for a file. */
-  onSelect: (file: FileListEntry) => void;
+  /** Refresh the file list after a Start invocation completes. */
+  onStarted?: () => void;
 }
 
-export function FileList({ files, loading, error, onRetry, onSelect }: FileListProps) {
+export function FileList({ files, loading, error, onRetry, onStarted }: FileListProps) {
   const sorted = useMemo(() => {
     if (!files) return [];
     return [...files].sort((a, b) => (b.modified ?? 0) - (a.modified ?? 0));
@@ -34,7 +37,11 @@ export function FileList({ files, loading, error, onRetry, onSelect }: FileListP
 
   if (loading && !files) {
     return (
-      <section aria-label="Recent G-code files" data-testid="klipper-files-loading">
+      <section
+        id={FILE_LIST_ANCHOR_ID}
+        aria-label="Recent G-code files"
+        data-testid="klipper-files-loading"
+      >
         <SectionHeading>Recent G-code</SectionHeading>
         <SkeletonRows count={3} />
       </section>
@@ -43,7 +50,11 @@ export function FileList({ files, loading, error, onRetry, onSelect }: FileListP
 
   if (error) {
     return (
-      <section aria-label="Recent G-code files" data-testid="klipper-files-error">
+      <section
+        id={FILE_LIST_ANCHOR_ID}
+        aria-label="Recent G-code files"
+        data-testid="klipper-files-error"
+      >
         <SectionHeading>Recent G-code</SectionHeading>
         <div style={{ display: "flex", flexDirection: "column", gap: sp(2), padding: sp(3) }}>
           <StatusBadge label={`Could not load files: ${error.message}`} status="error" />
@@ -68,18 +79,25 @@ export function FileList({ files, loading, error, onRetry, onSelect }: FileListP
 
   if (sorted.length === 0) {
     return (
-      <section aria-label="Recent G-code files" data-testid="klipper-files-empty">
+      <section
+        id={FILE_LIST_ANCHOR_ID}
+        aria-label="Recent G-code files"
+        data-testid="klipper-files-empty"
+      >
         <SectionHeading>Recent G-code</SectionHeading>
         <p style={{ padding: sp(3), ...muted }}>
-          No G-code uploaded yet. Files an agent uploads with{" "}
-          <code>klipper.upload_gcode</code> will appear here.
+          No G-code uploaded yet. Use the Upload affordance below to add a file.
         </p>
       </section>
     );
   }
 
   return (
-    <section aria-label="Recent G-code files" data-testid="klipper-files">
+    <section
+      id={FILE_LIST_ANCHOR_ID}
+      aria-label="Recent G-code files"
+      data-testid="klipper-files"
+    >
       <SectionHeading>Recent G-code</SectionHeading>
       <ul
         style={{
@@ -91,7 +109,7 @@ export function FileList({ files, loading, error, onRetry, onSelect }: FileListP
         }}
       >
         {sorted.map((file) => (
-          <FileRow key={file.path} file={file} onSelect={onSelect} />
+          <FileRow key={file.path} file={file} onStarted={onStarted} />
         ))}
       </ul>
     </section>
@@ -100,103 +118,80 @@ export function FileList({ files, loading, error, onRetry, onSelect }: FileListP
 
 interface FileRowProps {
   file: FileListEntry;
-  onSelect: (file: FileListEntry) => void;
+  onStarted?: () => void;
 }
 
-function FileRow({ file, onSelect }: FileRowProps) {
+function FileRow({ file, onStarted }: FileRowProps) {
   const displayName = file.path.split("/").pop() ?? file.path;
-  const { data: meta, loading: metaLoading } = usePluginData<FileMetadata>("file_metadata", {
-    filename: file.path,
-  });
-  const thumbUrl = meta ? firstInlineThumbnailDataUrl(meta.thumbnails) : null;
+  const startPrint = usePluginAction("start_print");
+  const toast = usePluginToast();
+  const [busy, setBusy] = useState(false);
+
+  async function handleStart() {
+    if (busy) return;
+    setBusy(true);
+    try {
+      await startPrint({ filename: file.path });
+      toast({ title: `Started ${displayName}`, tone: "success" });
+      onStarted?.();
+    } catch (err) {
+      toast({
+        title: "Could not start print",
+        body: err instanceof Error ? err.message : String(err),
+        tone: "error",
+      });
+    } finally {
+      setBusy(false);
+    }
+  }
 
   return (
-    <li>
+    <li
+      title={file.path}
+      data-testid={`klipper-file-row-${file.path}`}
+      style={{
+        display: "grid",
+        gridTemplateColumns: "48px 1fr auto",
+        gap: sp(3),
+        alignItems: "center",
+        padding: `${sp(2)} ${sp(3)}`,
+        minHeight: TAP_TARGET_MIN,
+      }}
+    >
+      <PrinterGlyph sizePx={48} />
+      <div style={{ display: "flex", flexDirection: "column", gap: sp(1), minWidth: 0 }}>
+        <span
+          style={{
+            fontSize: fontSize.base,
+            fontWeight: 600,
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+          }}
+        >
+          {displayName}
+        </span>
+        <span style={muted}>
+          {formatBytes(file.size)} · {formatRelativeTime(file.modified)}
+        </span>
+      </div>
       <button
         type="button"
-        onClick={() => onSelect(file)}
-        title={file.path}
-        aria-label={`Open ${displayName}`}
-        data-testid={`klipper-file-row-${file.path}`}
+        onClick={handleStart}
+        disabled={busy}
+        aria-busy={busy || undefined}
+        data-testid="klipper-file-row-start"
+        aria-label={`Start ${displayName}`}
         style={{
-          width: "100%",
+          flexShrink: 0,
           minHeight: TAP_TARGET_MIN,
-          display: "grid",
-          gridTemplateColumns: "48px 1fr auto",
-          gap: sp(3),
-          alignItems: "center",
           padding: `${sp(2)} ${sp(3)}`,
-          textAlign: "left",
-          background: "transparent",
-          border: "none",
-          cursor: "pointer",
         }}
       >
-        <Thumbnail loading={metaLoading} src={thumbUrl} alt="" sizePx={48} />
-        <div style={{ display: "flex", flexDirection: "column", gap: sp(1), minWidth: 0 }}>
-          <span
-            style={{
-              fontSize: fontSize.base,
-              fontWeight: 600,
-              overflow: "hidden",
-              textOverflow: "ellipsis",
-              whiteSpace: "nowrap",
-            }}
-          >
-            {displayName}
-          </span>
-          <span style={muted}>
-            {formatBytes(file.size)} · {formatRelativeTime(file.modified)}
-          </span>
-        </div>
-        <span aria-hidden="true" style={{ fontSize: fontSize.md, opacity: 0.5 }}>
-          ›
-        </span>
+        {busy ? "Starting…" : "Start"}
       </button>
     </li>
   );
-}
-
-interface ThumbnailProps {
-  loading: boolean;
-  src: string | null;
-  alt: string;
-  sizePx: number;
-}
-
-export function Thumbnail({ loading, src, alt, sizePx }: ThumbnailProps) {
-  const dim = `${sizePx}px`;
-  if (loading) {
-    return (
-      <span
-        data-testid="klipper-thumb-loading"
-        style={{
-          width: dim,
-          height: dim,
-          display: "inline-flex",
-          alignItems: "center",
-          justifyContent: "center",
-          background: "rgba(0,0,0,0.04)",
-          borderRadius: "4px",
-        }}
-      >
-        <Spinner size="sm" label="Loading thumbnail" />
-      </span>
-    );
-  }
-  if (src) {
-    return (
-      <img
-        src={src}
-        alt={alt}
-        width={sizePx}
-        height={sizePx}
-        data-testid="klipper-thumb-image"
-        style={{ width: dim, height: dim, objectFit: "contain", borderRadius: "4px" }}
-      />
-    );
-  }
-  return <PrinterGlyph sizePx={sizePx} />;
 }
 
 function PrinterGlyph({ sizePx }: { sizePx: number }) {
@@ -213,7 +208,6 @@ function PrinterGlyph({ sizePx }: { sizePx: number }) {
         justifyContent: "center",
         background: "rgba(0,0,0,0.04)",
         borderRadius: "4px",
-        fontSize: `${Math.round(sizePx * 0.6)}px`,
       }}
     >
       <svg
@@ -293,6 +287,7 @@ function SkeletonRows({ count }: { count: number }) {
               }}
             />
           </span>
+          <Spinner size="sm" label="Loading" />
         </li>
       ))}
     </ul>

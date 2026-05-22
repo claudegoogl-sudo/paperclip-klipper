@@ -1,14 +1,17 @@
 // @vitest-environment jsdom
 /**
- * UI interaction tests for the Klipper page (PLA-480 / §6.4).
+ * UI interaction tests for the Klipper page (PLA-480 / §6.4 rev-4).
  *
- * Covers all four sections (connection banner, file list, detail view,
- * active print panel) per AC §5. Data shapes feed in from the PLA-475
- * MockMoonraker fixture — for the file list / metadata shapes we drive a
- * real MoonrakerClient through MockMoonraker so the assertions exercise
- * the same payloads the worker produces in production. SDK hooks are
- * mocked so the component tree never touches the bridge transport (which
- * is a host runtime, not present under vitest).
+ * Covers all five sections per AC §5 (rev-4):
+ *   §1 ConnectionBanner — connected / connecting / reconnecting / failed / unconfigured
+ *   §2 ActivePrint — empty + idle CTA / printing / paused / error / cancel-confirm
+ *   §3 FileList — list / loading / empty / error+retry / inline Start per row
+ *   §4 UploadAffordance — idle / selected / validation-error / uploading / success / failure
+ *   §5 LastCompletedJob — hidden during printing; visible + collapsible after
+ *
+ * Data shapes feed in from the PLA-475 MockMoonraker fixture (where the
+ * worker contract matters); SDK hooks are mocked so the component tree
+ * never touches the bridge transport (host runtime, not present in vitest).
  */
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
@@ -18,7 +21,6 @@ import manifest from "../../src/manifest.js";
 import type {
   ConnectionStateSnapshot,
   FileListEntry,
-  FileMetadata,
   MoonrakerStatusSnapshot,
 } from "../../src/worker/MoonrakerClient.js";
 import { MoonrakerClient } from "../../src/worker/MoonrakerClient.js";
@@ -54,8 +56,7 @@ vi.mock("@paperclipai/plugin-sdk/ui", () => ({
   }),
 }));
 
-// Stable refs for the test harness to assert on.
-function makeDataResult<T>(data: T | null, opts: Partial<{ loading: boolean; error: { message: string } | null }> = {}) {
+function makeDataResult<T>(data: T | null, opts: Partial<{ loading: boolean; error: { message: string; code?: string } | null }> = {}) {
   return {
     data,
     loading: opts.loading ?? false,
@@ -78,7 +79,7 @@ function makeStreamResult() {
 interface DataMapEntry {
   data?: unknown;
   loading?: boolean;
-  error?: { message: string } | null;
+  error?: { message: string; code?: string } | null;
 }
 
 function setDataMap(map: Record<string, DataMapEntry>) {
@@ -94,6 +95,15 @@ function setDataMap(map: Record<string, DataMapEntry>) {
   });
 }
 
+const PAGE_CONTEXT = {
+  companyId: null,
+  companyPrefix: null,
+  projectId: null,
+  entityId: null,
+  entityType: null,
+  userId: null,
+};
+
 beforeEach(() => {
   dataFn.mockReset();
   streamFn.mockReset();
@@ -107,8 +117,8 @@ afterEach(() => {
 });
 
 // ── Page orchestrator ────────────────────────────────────────────────────
-describe("Page orchestrator (PLA-480 §6.4)", () => {
-  it("renders all four sections wired to the right RPC keys", async () => {
+describe("Page orchestrator (PLA-480 §6.4 rev-4)", () => {
+  it("renders all five sections wired to the right RPC keys", async () => {
     const conn: ConnectionStateSnapshot = { state: "connected", attempts: 0 };
     const status: MoonrakerStatusSnapshot = {
       objects: {
@@ -124,34 +134,30 @@ describe("Page orchestrator (PLA-480 §6.4)", () => {
     const files: FileListEntry[] = [
       { path: "benchy.gcode", size: 1024 * 1024, modified: Date.now() / 1000 - 60 },
     ];
-    setDataMap({ status: { data: status }, files: { data: files }, file_metadata: { data: { filename: "benchy.gcode" } } });
+    setDataMap({ status: { data: status }, files: { data: files } });
 
     const { Page } = await import("../../src/ui/index.js");
-    render(<Page context={{
-      companyId: null,
-      companyPrefix: null,
-      projectId: null,
-      entityId: null,
-      entityType: null,
-      userId: null,
-    }} />);
+    render(<Page context={PAGE_CONTEXT} />);
 
-    // Section 1: banner is hidden in `connected` state.
+    // §1 banner hidden in `connected` state.
     expect(screen.queryByTestId("klipper-banner-failed")).toBeNull();
     expect(screen.queryByTestId("klipper-banner-connecting")).toBeNull();
-    // Section 2: file list shows the row.
+    // §3 file list shows the row.
     expect(screen.getByTestId("klipper-files")).toBeTruthy();
     expect(screen.getByText("benchy.gcode")).toBeTruthy();
-    // Section 4: active panel shows the idle empty state.
+    // §2 idle empty-state with the Start-a-print CTA pointing at §3.
     expect(screen.getByTestId("klipper-active-empty")).toBeTruthy();
+    expect(screen.getByTestId("klipper-active-empty-cta")).toBeTruthy();
+    // §4 upload affordance.
+    expect(screen.getByTestId("klipper-upload")).toBeTruthy();
+    // §5 hidden when state is standby (no completion to surface yet).
+    expect(screen.queryByTestId("klipper-last-completed")).toBeNull();
 
     // Stream subscribed to the documented channel.
     expect(streamFn).toHaveBeenCalledWith("klipper");
-    // All four data keys exercised.
     const keysSeen = dataFn.mock.calls.map((c) => c[0]);
     expect(keysSeen).toContain("status");
     expect(keysSeen).toContain("files");
-    expect(keysSeen).toContain("file_metadata");
   });
 
   it("promotes the active print panel above the queue while printing", async () => {
@@ -172,23 +178,13 @@ describe("Page orchestrator (PLA-480 §6.4)", () => {
     });
 
     const { Page } = await import("../../src/ui/index.js");
-    const { container } = render(<Page context={{
-      companyId: null,
-      companyPrefix: null,
-      projectId: null,
-      entityId: null,
-      entityType: null,
-      userId: null,
-    }} />);
+    const { container } = render(<Page context={PAGE_CONTEXT} />);
 
-    // Active panel rendered with the layer/elapsed/eta line.
     expect(screen.getByTestId("klipper-active")).toBeTruthy();
     expect(screen.getByTestId("klipper-active-percent").textContent).toBe("25%");
     expect(screen.getByTestId("klipper-active-layers-eta").textContent).toMatch(/Layer 10 of 100/);
 
-    // Ordering: the `data-testid="klipper-active"` element must appear before
-    // the file-list section in document order so progress/Cancel are above
-    // the fold on mobile.
+    // Ordering: active before file list while printing.
     const activeEl = container.querySelector("[data-testid='klipper-active']");
     const filesEl =
       container.querySelector("[data-testid='klipper-files']") ??
@@ -200,32 +196,30 @@ describe("Page orchestrator (PLA-480 §6.4)", () => {
     ).toBeTruthy();
   });
 
+  it("renders the full-replace unconfigured card when status.error has code 'unconfigured'", async () => {
+    setDataMap({
+      status: { data: null, error: { message: "moonrakerBaseUrl is not set", code: "unconfigured" } },
+      files: { data: [] as FileListEntry[] },
+    });
+    const { Page } = await import("../../src/ui/index.js");
+    render(<Page context={PAGE_CONTEXT} />);
+
+    expect(screen.getByTestId("klipper-unconfigured")).toBeTruthy();
+    const cta = screen.getByTestId("klipper-unconfigured-cta") as HTMLButtonElement;
+    expect(cta.disabled).toBe(true);
+    expect(cta.getAttribute("aria-describedby")).toBe("klipper-unconfigured-helper");
+    // None of the regular five sections render when we short-circuit.
+    expect(screen.queryByTestId("klipper-files")).toBeNull();
+    expect(screen.queryByTestId("klipper-upload")).toBeNull();
+  });
+
   it("wraps the page in an ErrorBoundary that contains render crashes", async () => {
-    // Force a render error inside one section by handing it bad data shape
-    // that would throw if not defensive — we use the status print_stats
-    // panel which expects an object. The ErrorBoundary should swallow it.
-    const onError = vi.fn();
     setDataMap({
       status: { data: { objects: null as unknown as Record<string, Record<string, unknown>>, updatedAt: null, connection: { state: "connected", attempts: 0 } } },
       files: { data: [] as FileListEntry[] },
     });
     const { Page } = await import("../../src/ui/index.js");
-    expect(() =>
-      render(
-        <Page context={{
-          companyId: null,
-          companyPrefix: null,
-          projectId: null,
-          entityId: null,
-          entityType: null,
-          userId: null,
-        }} />,
-      ),
-    ).not.toThrow();
-    // ErrorBoundary onError only fires on actual thrown render — defensive
-    // code may avoid the throw entirely, which is also fine. The contract
-    // we care about: the call site is wrapped, page didn't crash.
-    expect(onError).not.toHaveBeenCalled();
+    expect(() => render(<Page context={PAGE_CONTEXT} />)).not.toThrow();
   });
 });
 
@@ -263,16 +257,24 @@ describe("ConnectionBanner (§6.4 §1)", () => {
     expect(screen.getByText(/ECONNREFUSED 127.0.0.1:7125/)).toBeTruthy();
     const btn = screen.getByTestId("klipper-banner-reconnect");
     expect(btn.tagName).toBe("BUTTON");
-    // Tap target floor (≥44px) — JSDOM doesn't compute layout, so we
-    // assert via the inline style.
     expect(btn.getAttribute("style")).toMatch(/min-height:\s*44px/);
     await user.click(btn);
     expect(getAction("retry_connection")).toHaveBeenCalledTimes(1);
   });
+
+  it("renders an unconfigured 'set up your printer' inline branch (PLA-502 preferred surface)", async () => {
+    // The narrow ConnectionStateSnapshot type doesn't include the future
+    // "unconfigured" variant yet (PLA-502 will widen it). Cast through
+    // `unknown` so this test pins the UI commitment we'll honour.
+    await renderBanner({ state: "unconfigured", attempts: 0 } as unknown as ConnectionStateSnapshot);
+    expect(screen.getByTestId("klipper-banner-unconfigured")).toBeTruthy();
+    expect(screen.getByText(/Set up your Klipper printer/i)).toBeTruthy();
+    expect(screen.getByText(/Add your Moonraker host URL to start using this page/i)).toBeTruthy();
+  });
 });
 
 // ── Active print ─────────────────────────────────────────────────────────
-describe("ActivePrint (§6.4 §4)", () => {
+describe("ActivePrint (§6.4 §2)", () => {
   async function renderActive(snapshot: MoonrakerStatusSnapshot | null) {
     const { ActivePrint } = await import("../../src/ui/ActivePrint.js");
     return render(<ActivePrint status={snapshot} />);
@@ -295,9 +297,30 @@ describe("ActivePrint (§6.4 §4)", () => {
     };
   }
 
-  it("renders the empty state in standby", async () => {
+  it("renders the empty state with a 'Start a print ↓' CTA in standby", async () => {
     await renderActive(statusFromStats({ state: "standby" }));
-    expect(screen.getByTestId("klipper-active-empty").textContent).toMatch(/No active print/);
+    const empty = screen.getByTestId("klipper-active-empty");
+    expect(empty.textContent).toMatch(/No active print/);
+    expect(screen.getByTestId("klipper-active-empty-cta").textContent).toMatch(/Start a print/);
+  });
+
+  it("empty-state CTA focuses the file list's first Start button", async () => {
+    const user = userEvent.setup();
+    // Provide an anchor and a Start button so the CTA's lookup succeeds.
+    const list = document.createElement("section");
+    list.id = "klipper-file-list";
+    const startBtn = document.createElement("button");
+    startBtn.setAttribute("data-testid", "klipper-file-row-start");
+    list.appendChild(startBtn);
+    document.body.appendChild(list);
+    list.scrollIntoView = vi.fn();
+
+    await renderActive(statusFromStats({ state: "complete", filename: "x.gcode", total_duration: 60 }));
+    await user.click(screen.getByTestId("klipper-active-empty-cta"));
+    expect(list.scrollIntoView).toHaveBeenCalled();
+    expect(document.activeElement).toBe(startBtn);
+
+    document.body.removeChild(list);
   });
 
   it("renders progress, layers, ETA, and temps while printing", async () => {
@@ -318,11 +341,8 @@ describe("ActivePrint (§6.4 §4)", () => {
     expect(eta).toMatch(/Layer 50 of 100/);
     expect(eta).toMatch(/Elapsed 30m/);
     expect(eta).toMatch(/ETA 30m/);
-    // Numeric % is alongside the bar — colour-independence (WCAG).
     expect(screen.getByTestId("klipper-active-progress").getAttribute("aria-valuenow")).toBe("50");
-    // display_status.message rendered as a quiet helper.
     expect(screen.getByTestId("klipper-active-display-message").textContent).toBe("Cooling");
-    // Temp pairs (KeyValueList values render as "200 °C / 210 °C").
     const hot = screen.getByTestId("sdk-keyvalue-Hotend").textContent ?? "";
     expect(hot).toMatch(/200 °C \/ 210 °C/);
   });
@@ -382,12 +402,11 @@ describe("ActivePrint (§6.4 §4)", () => {
   });
 });
 
-// ── File list + detail view ──────────────────────────────────────────────
-describe("FileList + FileDetail (§6.4 §2 + §3, against MockMoonraker fixture)", () => {
+// ── File list (§6.4 §3 — inline Start, no thumbnails) ─────────────────────
+describe("FileList (§6.4 §3, against MockMoonraker fixture)", () => {
   let mock: MockMoonraker;
   let client: MoonrakerClient;
   let fixtureFiles: FileListEntry[];
-  let fixtureMetadata: FileMetadata;
 
   beforeAll(async () => {
     mock = new MockMoonraker({
@@ -395,19 +414,6 @@ describe("FileList + FileDetail (§6.4 §2 + §3, against MockMoonraker fixture)
         { path: "alpha.gcode", size: 256 * 1024, modified: 1779000000 },
         { path: "queue/beta.gcode", size: 1.2 * 1024 * 1024, modified: 1779100000 },
       ],
-      metadata: {
-        "alpha.gcode": {
-          filename: "alpha.gcode",
-          size: 256 * 1024,
-          estimated_time: 3600,
-          filament_total: 4200,
-          modified: 1779000000,
-          thumbnails: [
-            { width: 32, height: 32, size: 4, data: "AAAA" },
-            { width: 240, height: 240, size: 16, data: "BBBB" },
-          ],
-        },
-      },
     });
     await mock.start();
     const harness = createTestHarness({
@@ -428,119 +434,207 @@ describe("FileList + FileDetail (§6.4 §2 + §3, against MockMoonraker fixture)
       logger: harness.ctx.logger,
     });
     fixtureFiles = await client.listFiles("gcodes");
-    fixtureMetadata = await client.getFileMetadata("alpha.gcode");
   });
 
   afterAll(async () => {
     await mock.stop();
   });
 
-  async function renderList(onSelect = vi.fn()) {
+  async function renderList(extra: Partial<{ onStarted: () => void; onRetry: () => void }> = {}) {
     const { FileList } = await import("../../src/ui/FileList.js");
-    setDataMap({ file_metadata: { data: fixtureMetadata } });
-    render(<FileList files={fixtureFiles} loading={false} error={null} onSelect={onSelect} />);
-    return onSelect;
+    setDataMap({});
+    render(<FileList files={fixtureFiles} loading={false} error={null} {...extra} />);
   }
 
   it("lists files newest-first with size + relative-time subline", async () => {
     await renderList();
     expect(screen.getByTestId("klipper-files")).toBeTruthy();
-    const rows = screen.getAllByRole("button");
     // Beta is the newer modified value → it must appear first.
-    expect(rows[0].getAttribute("aria-label")).toMatch(/beta\.gcode/);
-    expect(rows[1].getAttribute("aria-label")).toMatch(/alpha\.gcode/);
+    const items = screen.getAllByRole("listitem");
+    expect(items[0].textContent).toMatch(/beta\.gcode/);
+    expect(items[1].textContent).toMatch(/alpha\.gcode/);
   });
 
   it("renders the loading skeleton when files are null and loading", async () => {
     const { FileList } = await import("../../src/ui/FileList.js");
     setDataMap({});
-    render(<FileList files={null} loading={true} error={null} onSelect={vi.fn()} />);
+    render(<FileList files={null} loading={true} error={null} />);
     expect(screen.getByTestId("klipper-files-loading")).toBeTruthy();
     expect(screen.getAllByTestId("klipper-files-skeleton-row")).toHaveLength(3);
   });
 
-  it("renders an empty state with the upload hint when files are []", async () => {
+  it("renders an empty state pointing to the Upload affordance when files are []", async () => {
     const { FileList } = await import("../../src/ui/FileList.js");
-    setDataMap({ file_metadata: { data: null } });
-    render(<FileList files={[]} loading={false} error={null} onSelect={vi.fn()} />);
+    setDataMap({});
+    render(<FileList files={[]} loading={false} error={null} />);
     expect(screen.getByTestId("klipper-files-empty")).toBeTruthy();
-    expect(screen.getByText(/klipper\.upload_gcode/)).toBeTruthy();
+    expect(screen.getByText(/Upload affordance/)).toBeTruthy();
   });
 
   it("renders an error state with a Retry button", async () => {
     const { FileList } = await import("../../src/ui/FileList.js");
     const retry = vi.fn();
     setDataMap({});
-    render(<FileList files={null} loading={false} error={{ message: "boom" }} onRetry={retry} onSelect={vi.fn()} />);
+    render(<FileList files={null} loading={false} error={{ message: "boom" }} onRetry={retry} />);
     expect(screen.getByTestId("klipper-files-error")).toBeTruthy();
     fireEvent.click(screen.getByTestId("klipper-files-retry"));
     expect(retry).toHaveBeenCalledTimes(1);
   });
 
-  it("clicking a row opens the detail view via onSelect", async () => {
+  it("inline Start per row invokes start_print with { filename }", async () => {
     const user = userEvent.setup();
-    const onSelect = await renderList();
-    await user.click(screen.getByRole("button", { name: /alpha\.gcode/i }));
-    expect(onSelect).toHaveBeenCalledTimes(1);
-    const arg = onSelect.mock.calls[0][0] as FileListEntry;
-    expect(arg.path).toBe("alpha.gcode");
+    const onStarted = vi.fn();
+    await renderList({ onStarted });
+    const startButtons = screen.getAllByTestId("klipper-file-row-start");
+    expect(startButtons).toHaveLength(2);
+    // Newest-first → button[0] starts beta.gcode.
+    await user.click(startButtons[0]);
+    expect(getAction("start_print")).toHaveBeenCalledWith({ filename: "queue/beta.gcode" });
+    expect(onStarted).toHaveBeenCalled();
   });
 
-  it("FileDetail renders KeyValueList from MockMoonraker metadata", async () => {
-    const { FileDetail } = await import("../../src/ui/FileDetail.js");
-    setDataMap({ file_metadata: { data: fixtureMetadata } });
-    render(<FileDetail file={fixtureFiles.find((f) => f.path === "alpha.gcode")!} onBack={vi.fn()} />);
-    expect(screen.getByTestId("klipper-detail-title").textContent).toMatch(/alpha\.gcode/);
-    const meta = screen.getByTestId("klipper-detail-metadata");
-    expect(meta.textContent).toMatch(/Size/);
-    expect(meta.textContent).toMatch(/Est\. print time/);
-    expect(meta.textContent).toMatch(/Filament/);
-    // Inline base64 thumbnail rendered as data URL (no `ctx.assets`).
-    const img = screen.getByTestId("klipper-thumb-image") as HTMLImageElement;
-    expect(img.src.startsWith("data:image/png;base64,")).toBe(true);
+  it("inline Start row has the printer-glyph fallback (no thumbnails in v1.0)", async () => {
+    await renderList();
+    const glyphs = screen.getAllByTestId("klipper-thumb-glyph");
+    expect(glyphs.length).toBeGreaterThan(0);
+    // No image element rendered — thumbnails deferred to v1.1.
+    expect(screen.queryByTestId("klipper-thumb-image")).toBeNull();
+  });
+});
+
+// ── Upload affordance (§6.4 §4) ──────────────────────────────────────────
+describe("UploadAffordance (§6.4 §4)", () => {
+  async function renderUpload(onUploaded = vi.fn()) {
+    const { UploadAffordance } = await import("../../src/ui/UploadAffordance.js");
+    render(<UploadAffordance onUploaded={onUploaded} />);
+    return { onUploaded };
+  }
+
+  function pickFile(file: File) {
+    const input = screen.getByTestId("klipper-upload-input") as HTMLInputElement;
+    Object.defineProperty(input, "files", { value: [file], configurable: true });
+    fireEvent.change(input);
+  }
+
+  it("renders an idle Choose-file CTA + 'No file selected' helper", async () => {
+    await renderUpload();
+    expect(screen.getByTestId("klipper-upload")).toBeTruthy();
+    expect(screen.getByTestId("klipper-upload-pick")).toBeTruthy();
+    expect(screen.getByText(/No file selected/)).toBeTruthy();
   });
 
-  it("Start print calls start_print with { filename }", async () => {
-    const user = userEvent.setup();
-    const { FileDetail } = await import("../../src/ui/FileDetail.js");
-    setDataMap({ file_metadata: { data: fixtureMetadata } });
-    const onBack = vi.fn();
-    render(<FileDetail file={fixtureFiles.find((f) => f.path === "alpha.gcode")!} onBack={onBack} />);
-    await user.click(screen.getByTestId("klipper-detail-start"));
-    expect(getAction("start_print")).toHaveBeenCalledWith({ filename: "alpha.gcode" });
-    // On success the panel returns to the queue.
-    expect(onBack).toHaveBeenCalled();
+  it("rejects bad filenames client-side with the manifest regex message", async () => {
+    await renderUpload();
+    pickFile(new File(["G1"], "weird name.gcode"));
+    expect(screen.getByText(/Filename must start with a letter or digit/)).toBeTruthy();
   });
 
-  it("Delete confirms then calls delete_file with { path, root: 'gcodes' }", async () => {
+  it("after a valid pick, shows filename + Choose another + Upload", async () => {
+    await renderUpload();
+    pickFile(new File(["G1 X0\n"], "cube.gcode"));
+    expect(screen.getByTestId("klipper-upload-submit")).toBeTruthy();
+    expect(screen.getByText(/cube\.gcode/)).toBeTruthy();
+  });
+
+  it("Upload calls upload_gcode with {filename, gcodeBase64} and surfaces success", async () => {
     const user = userEvent.setup();
-    const { FileDetail } = await import("../../src/ui/FileDetail.js");
-    setDataMap({ file_metadata: { data: fixtureMetadata } });
-    const onBack = vi.fn();
-    const onChanged = vi.fn();
-    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
-    render(
-      <FileDetail
-        file={fixtureFiles.find((f) => f.path === "alpha.gcode")!}
-        onBack={onBack}
-        onFilesChanged={onChanged}
-      />,
+    const { onUploaded } = await renderUpload();
+    const file = new File(["G1 X0\n"], "cube.gcode");
+    pickFile(file);
+    await user.click(screen.getByTestId("klipper-upload-submit"));
+    // FileReader is async — wait for the success badge.
+    const badge = await screen.findByText(/Uploaded — cube\.gcode/);
+    expect(badge).toBeTruthy();
+    const call = getAction("upload_gcode").mock.calls[0]?.[0] as {
+      filename: string;
+      gcodeBase64: string;
+    };
+    expect(call.filename).toBe("cube.gcode");
+    expect(typeof call.gcodeBase64).toBe("string");
+    expect(call.gcodeBase64.length).toBeGreaterThan(0);
+    // Base64 of "G1 X0\n" is "RzEgWDAK".
+    expect(call.gcodeBase64).toBe("RzEgWDAK");
+    expect(onUploaded).toHaveBeenCalled();
+  });
+
+  it("surfaces upload failures verbatim from PluginBridgeError (no rewording)", async () => {
+    const user = userEvent.setup();
+    getAction("upload_gcode").mockRejectedValueOnce(
+      new Error("auto_upload_artifacts is false; the platform.klipper.config.auto_upload_artifacts config flag must be set to true before uploads are allowed."),
     );
-    await user.click(screen.getByTestId("klipper-detail-delete"));
-    expect(confirmSpy).toHaveBeenCalled();
-    expect(getAction("delete_file")).toHaveBeenCalledWith({ path: "alpha.gcode", root: "gcodes" });
-    expect(onBack).toHaveBeenCalled();
-    expect(onChanged).toHaveBeenCalled();
-    confirmSpy.mockRestore();
+    await renderUpload();
+    pickFile(new File(["G1"], "cube.gcode"));
+    await user.click(screen.getByTestId("klipper-upload-submit"));
+    const err = await screen.findByTestId("klipper-upload-error");
+    expect(err.textContent).toMatch(/auto_upload_artifacts is false/);
+    expect(screen.getByTestId("klipper-upload-try-again")).toBeTruthy();
+  });
+});
+
+// ── Last completed job (§6.4 §5) ─────────────────────────────────────────
+describe("LastCompletedJob (§6.4 §5)", () => {
+  function statusWith(stats: Record<string, unknown>): MoonrakerStatusSnapshot {
+    return {
+      objects: {
+        print_stats: stats,
+        extruder: {},
+        heater_bed: {},
+        virtual_sdcard: {},
+        display_status: {},
+      },
+      updatedAt: new Date().toISOString(),
+      connection: { state: "connected", attempts: 0 },
+    };
+  }
+
+  async function renderFooter(snapshot: MoonrakerStatusSnapshot | null) {
+    const { LastCompletedJob } = await import("../../src/ui/LastCompletedJob.js");
+    render(<LastCompletedJob status={snapshot} />);
+  }
+
+  it("hidden when state is standby / printing / paused", async () => {
+    await renderFooter(statusWith({ state: "printing", filename: "x.gcode" }));
+    expect(screen.queryByTestId("klipper-last-completed")).toBeNull();
+    cleanup();
+    await renderFooter(statusWith({ state: "standby" }));
+    expect(screen.queryByTestId("klipper-last-completed")).toBeNull();
   });
 
-  it("Back button triggers onBack", async () => {
+  it("collapsed footer shows filename + 'finished' on complete", async () => {
+    await renderFooter(statusWith({ state: "complete", filename: "cube.gcode", total_duration: 3700 }));
+    expect(screen.getByTestId("klipper-last-completed")).toBeTruthy();
+    const toggle = screen.getByTestId("klipper-last-completed-toggle");
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    expect(toggle.textContent).toMatch(/cube\.gcode/);
+    expect(toggle.textContent).toMatch(/finished/);
+    // Body hidden in collapsed state.
+    expect(screen.queryByTestId("klipper-last-completed-body")).toBeNull();
+  });
+
+  it("expanding reveals StatusBadge + total duration", async () => {
     const user = userEvent.setup();
-    const { FileDetail } = await import("../../src/ui/FileDetail.js");
-    setDataMap({ file_metadata: { data: fixtureMetadata } });
-    const onBack = vi.fn();
-    render(<FileDetail file={fixtureFiles[0]} onBack={onBack} />);
-    await user.click(screen.getByTestId("klipper-detail-back"));
-    expect(onBack).toHaveBeenCalledTimes(1);
+    await renderFooter(statusWith({ state: "complete", filename: "cube.gcode", total_duration: 3700 }));
+    const toggle = screen.getByTestId("klipper-last-completed-toggle");
+    await user.click(toggle);
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+    const body = screen.getByTestId("klipper-last-completed-body");
+    expect(body.textContent).toMatch(/Finished after 1h 1m/);
+    expect(screen.getByText("Finished")).toBeTruthy();
+  });
+
+  it("shows the Failed pill + state_message for error state", async () => {
+    const user = userEvent.setup();
+    await renderFooter(statusWith({ state: "error", filename: "fail.gcode", state_message: "Thermal runaway" }));
+    await user.click(screen.getByTestId("klipper-last-completed-toggle"));
+    expect(screen.getByText("Failed")).toBeTruthy();
+    expect(screen.getByText(/Last error: Thermal runaway/)).toBeTruthy();
+  });
+
+  it("shows the Cancelled pill on cancelled state", async () => {
+    const user = userEvent.setup();
+    await renderFooter(statusWith({ state: "cancelled", filename: "abort.gcode", total_duration: 600 }));
+    await user.click(screen.getByTestId("klipper-last-completed-toggle"));
+    expect(screen.getByText("Cancelled")).toBeTruthy();
+    expect(screen.getByText(/Cancelled after 10m/)).toBeTruthy();
   });
 });
