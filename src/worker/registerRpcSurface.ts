@@ -31,7 +31,13 @@ export interface KlipperConfig {
 
 export interface RpcSurfaceOptions {
   config: KlipperConfig;
-  client: MoonrakerClient;
+  /**
+   * MoonrakerClient or `null` when the worker started without
+   * `moonrakerBaseUrl` configured. When `null`, every handler short-circuits
+   * with a `prerequisite_missing` result rather than dereferencing the
+   * client. See PLA-502/503 (permissive init, matches CAD pattern).
+   */
+  client: MoonrakerClient | null;
   /** Emit a status snapshot to the UI stream channel used by `usePluginStream`. */
   emitStreamSnapshot?: (snapshot: MoonrakerStatusSnapshot) => void;
   /** Emit a connection-state event to the UI stream channel. */
@@ -41,30 +47,70 @@ export interface RpcSurfaceOptions {
 const CONFIG_GATE_AUTO_UPLOAD = "auto_upload_artifacts";
 const CONFIG_GATE_AGENT_PRINT = "allow_agent_initiated_print";
 
+const PREREQ_MISSING_MESSAGE =
+  "moonrakerBaseUrl not configured — set config via the host plugin settings UI.";
+
+/** Tool-shaped `prerequisite_missing` payload (matches the CAD plugin shape). */
+function prerequisiteMissingToolResult(): ToolResult {
+  return {
+    data: {
+      error: "prerequisite_missing",
+      message: PREREQ_MISSING_MESSAGE,
+    },
+  };
+}
+
+/** Action-side prerequisite-missing — thrown so the host surfaces it as an error. */
+function prerequisiteMissingError(): Error {
+  const err = new Error(PREREQ_MISSING_MESSAGE);
+  (err as Error & { code?: string }).code = "prerequisite_missing";
+  return err;
+}
+
 export function registerRpcSurface(
   ctx: PluginContext,
   options: RpcSurfaceOptions,
 ): void {
   const { config, client } = options;
+  const configured = client !== null && Boolean(config.moonrakerBaseUrl);
 
   // ── ctx.data ────────────────────────────────────────────────────────────
+  // Always register the data keys (the page slot expects them to exist even
+  // when the worker came up without config). When the client is absent we
+  // return safe defaults so the UI can render the needs-config placeholder.
+  ctx.data.register("config", async () => {
+    return {
+      configured,
+      moonrakerBaseUrl: configured ? config.moonrakerBaseUrl : null,
+    };
+  });
+
   // `usePluginData("status")` reads the cached snapshot. We do not block on
   // a fresh /printer/info call — the WS subscription keeps the snapshot warm
   // and the UI can call the `refresh` action to force a refetch.
   ctx.data.register("status", async () => {
+    if (!client) {
+      return {
+        connection: { state: "idle", attempts: 0, configured: false },
+        objects: null,
+      };
+    }
     return client.getStatusSnapshot();
   });
 
   ctx.data.register("connection", async () => {
+    if (!client) return { state: "idle", attempts: 0, configured: false };
     return client.getConnectionState();
   });
 
   ctx.data.register("files", async (params: Record<string, unknown>) => {
+    if (!client) return [];
     const root = typeof params.root === "string" ? params.root : "gcodes";
     return client.listFiles(root);
   });
 
   ctx.data.register("file_metadata", async (params: Record<string, unknown>) => {
+    if (!client) throw prerequisiteMissingError();
     const filename = typeof params.filename === "string" ? params.filename : "";
     if (!filename) throw new Error("file_metadata requires `filename`");
     return client.getFileMetadata(filename);
@@ -72,23 +118,29 @@ export function registerRpcSurface(
 
   // ── ctx.actions ─────────────────────────────────────────────────────────
   // Actions are UI-initiated mutations / fresh fetches. They reuse the same
-  // MoonrakerClient instance — no duplicated transport.
+  // MoonrakerClient instance — no duplicated transport. When config is
+  // missing they throw `prerequisite_missing` so the host surfaces a
+  // structured error to the caller.
   ctx.actions.register("refresh", async () => {
+    if (!client) throw prerequisiteMissingError();
     const info = await client.getPrinterInfo();
     return { ok: true, info, snapshot: client.getStatusSnapshot() };
   });
 
   ctx.actions.register("pause_print", async () => {
+    if (!client) throw prerequisiteMissingError();
     const result = await client.pausePrint();
     return { ok: true, result };
   });
 
   ctx.actions.register("resume_print", async () => {
+    if (!client) throw prerequisiteMissingError();
     const result = await client.resumePrint();
     return { ok: true, result };
   });
 
   ctx.actions.register("cancel_print", async () => {
+    if (!client) throw prerequisiteMissingError();
     const result = await client.cancelPrint();
     return { ok: true, result };
   });
@@ -97,6 +149,7 @@ export function registerRpcSurface(
   // `allow_agent_initiated_print` — that flag covers agent tools; a user
   // tapping the Start button in the UI is its own consent signal.
   ctx.actions.register("start_print", async (params: Record<string, unknown>) => {
+    if (!client) throw prerequisiteMissingError();
     const filename = typeof params.filename === "string" ? params.filename : "";
     if (!filename) throw new Error("start_print requires `filename`");
     const result = await client.startPrint(filename);
@@ -104,6 +157,7 @@ export function registerRpcSurface(
   });
 
   ctx.actions.register("delete_file", async (params: Record<string, unknown>) => {
+    if (!client) throw prerequisiteMissingError();
     const path = typeof params.path === "string" ? params.path : "";
     if (!path) throw new Error("delete_file requires `path`");
     const root = typeof params.root === "string" ? params.root : "gcodes";
@@ -112,6 +166,7 @@ export function registerRpcSurface(
   });
 
   ctx.actions.register("retry_connection", async () => {
+    if (!client) throw prerequisiteMissingError();
     await client.retryConnection();
     return { ok: true, connection: client.getConnectionState() };
   });
@@ -130,6 +185,7 @@ export function registerRpcSurface(
       parametersSchema: { type: "object", properties: {}, additionalProperties: false },
     },
     async (): Promise<ToolResult> => {
+      if (!client) return prerequisiteMissingToolResult();
       try {
         const snapshot = client.getStatusSnapshot();
         return { data: snapshot };
@@ -158,6 +214,7 @@ export function registerRpcSurface(
       },
     },
     async (params, _runCtx): Promise<ToolResult> => {
+      if (!client) return prerequisiteMissingToolResult();
       if (config.auto_upload_artifacts !== true) {
         return {
           error:
@@ -195,6 +252,7 @@ export function registerRpcSurface(
       },
     },
     async (params): Promise<ToolResult> => {
+      if (!client) return prerequisiteMissingToolResult();
       if (config.allow_agent_initiated_print !== true) {
         return {
           error:

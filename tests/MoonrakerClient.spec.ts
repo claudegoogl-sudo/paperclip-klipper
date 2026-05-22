@@ -41,6 +41,18 @@ interface RecordedStreamEvent {
   event: unknown;
 }
 
+/**
+ * Narrow `createKlipperWorker`'s `client: MoonrakerClient | null` return
+ * (the null branch landed in PLA-502/503 for permissive init) for tests that
+ * have configured `moonrakerBaseUrl` and therefore expect a real client.
+ */
+function expectClient<T extends { client: unknown }>(worker: T): T & { client: NonNullable<T["client"]> } {
+  if (worker.client === null || worker.client === undefined) {
+    throw new Error("test setup: createKlipperWorker returned a null client");
+  }
+  return worker as T & { client: NonNullable<T["client"]> };
+}
+
 function harnessWithStreams(config: Record<string, unknown>) {
   const harness = createTestHarness({
     manifest,
@@ -101,7 +113,7 @@ describe("MoonrakerClient REST", () => {
       moonrakerBaseUrl: mock.baseUrl(),
       moonrakerApiKeyRef: SECRET_REF,
     });
-    const { client } = await createKlipperWorker(harness.ctx, { autoStart: false });
+    const { client } = expectClient(await createKlipperWorker(harness.ctx, { autoStart: false }));
 
     const info = await client.getPrinterInfo();
     expect(info.state).toBe("ready");
@@ -144,7 +156,7 @@ describe("MoonrakerClient REST", () => {
       moonrakerBaseUrl: mock.baseUrl(),
       moonrakerApiKeyRef: SECRET_REF,
     });
-    const { client } = await createKlipperWorker(harness.ctx, { autoStart: false });
+    const { client } = expectClient(await createKlipperWorker(harness.ctx, { autoStart: false }));
 
     const payload = Buffer.from("G28\nG1 X10 Y10\n");
     const result = await client.uploadGcode("part.gcode", payload);
@@ -205,12 +217,12 @@ describe("MoonrakerClient WebSocket", () => {
       moonrakerApiKeyRef: SECRET_REF,
     });
     const updates: number[] = [];
-    const { client } = await createKlipperWorker(harness.ctx, {
+    const { client } = expectClient(await createKlipperWorker(harness.ctx, {
       autoStart: false,
       clientOverrides: {
         onStatus: () => updates.push(Date.now()),
       },
-    });
+    }));
 
     await client.start();
     await waitFor(() => client.getConnectionState().state === "connected", 2000);
@@ -241,7 +253,7 @@ describe("MoonrakerClient WebSocket", () => {
       moonrakerBaseUrl: mock.baseUrl(),
       moonrakerApiKeyRef: SECRET_REF,
     });
-    const { client } = await createKlipperWorker(harness.ctx, {
+    const { client } = expectClient(await createKlipperWorker(harness.ctx, {
       autoStart: false,
       clientOverrides: {
         reconnect: {
@@ -253,7 +265,7 @@ describe("MoonrakerClient WebSocket", () => {
         },
         random: () => 0.5,
       },
-    });
+    }));
 
     await client.start();
     await waitFor(() => client.getConnectionState().state === "connected", 2000);
@@ -281,7 +293,7 @@ describe("MoonrakerClient WebSocket", () => {
       moonrakerBaseUrl: mock.baseUrl(),
       moonrakerApiKeyRef: SECRET_REF,
     });
-    const { client } = await createKlipperWorker(harness.ctx, {
+    const { client } = expectClient(await createKlipperWorker(harness.ctx, {
       autoStart: false,
       clientOverrides: {
         reconnect: {
@@ -293,7 +305,7 @@ describe("MoonrakerClient WebSocket", () => {
         },
         random: () => 0.5,
       },
-    });
+    }));
 
     await client.start();
     await waitFor(() => client.getConnectionState().state === "connected", 2000);
@@ -328,7 +340,7 @@ describe("MoonrakerClient unauthenticated mode", () => {
     const { harness } = harnessWithStreams({
       moonrakerBaseUrl: mock.baseUrl(),
     });
-    const { client } = await createKlipperWorker(harness.ctx, { autoStart: false });
+    const { client } = expectClient(await createKlipperWorker(harness.ctx, { autoStart: false }));
 
     await client.getPrinterInfo();
     // No X-Api-Key header was sent on any request.

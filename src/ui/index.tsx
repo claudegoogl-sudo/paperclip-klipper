@@ -37,6 +37,37 @@ interface ClientStreamEvent {
   state?: ConnectionStateSnapshot;
 }
 
+interface ConfigDataSnapshot {
+  configured: boolean;
+  moonrakerBaseUrl: string | null;
+}
+
+/**
+ * Rendered when the worker started without `moonrakerBaseUrl` (PLA-502/503).
+ * Functional CTA only — UX polish is intentionally out of scope per the
+ * issue brief.
+ */
+function NeedsConfigPlaceholder() {
+  return (
+    <main
+      aria-label="Printer"
+      data-testid="klipper-page-needs-config"
+      style={{
+        ...stack(2),
+        padding: sp(3),
+        maxWidth: "720px",
+        margin: "0 auto",
+      }}
+    >
+      <h1 style={{ margin: 0 }}>Configure Moonraker</h1>
+      <p style={{ margin: 0 }}>
+        Set <code>moonrakerBaseUrl</code> in plugin settings to connect this
+        printer.
+      </p>
+    </main>
+  );
+}
+
 /**
  * `Page` is the entry component for the manifest's `page` slot
  * (id: `klipper-page`, exportName: `Page`, routePath: `printer`).
@@ -44,6 +75,10 @@ interface ClientStreamEvent {
 export function Page(_props: PluginPageProps) {
   const [selectedFile, setSelectedFile] = useState<FileListEntry | null>(null);
 
+  // PLA-502/503: branch on plugin config presence. When the worker started
+  // without `moonrakerBaseUrl` the page slot renders a needs-config CTA
+  // instead of trying to read status/files (which would no-op anyway).
+  const configData = usePluginData<ConfigDataSnapshot>("config");
   const status = usePluginData<MoonrakerStatusSnapshot>("status");
   const files = usePluginData<FileListEntry[]>("files");
   // Stream subscription keeps the active-print panel warm without polling.
@@ -94,6 +129,17 @@ export function Page(_props: PluginPageProps) {
       ),
     [selectedFile, files.data, files.loading, files.error, refreshFiles, handleBack],
   );
+
+  // PLA-502/503: if the worker reported no configured base URL, render the
+  // needs-config placeholder. Treat "loading" as "not yet known"; only
+  // branch once `configured` has resolved to a concrete `false`.
+  if (configData.data && configData.data.configured === false) {
+    return (
+      <ErrorBoundary>
+        <NeedsConfigPlaceholder />
+      </ErrorBoundary>
+    );
+  }
 
   return (
     <ErrorBoundary>
