@@ -173,10 +173,12 @@ export function registerRpcSurface(
 
   // ── ctx.tools ───────────────────────────────────────────────────────────
   // Each tool maps to a MoonrakerClient call and gates on the relevant
-  // opt-in config flag. Tool names are namespaced by manifest id, so the
-  // SDK sees them as `platform.klipper.get_printer_status` etc.
+  // opt-in config flag. The host does NOT auto-namespace tool names by
+  // manifest id — the name passed to `ctx.tools.register(name, …)` must
+  // equal `manifest.tools[].name` verbatim (e.g. `klipper.upload_gcode`).
+  // `tests/contract/manifest-worker.test.ts` enforces this.
   ctx.tools.register(
-    "get_printer_status",
+    "klipper.get_printer_status",
     {
       displayName: "Klipper Get Printer Status",
       description:
@@ -196,7 +198,7 @@ export function registerRpcSurface(
   );
 
   ctx.tools.register(
-    "upload_gcode",
+    "klipper.upload_gcode",
     {
       displayName: "Klipper Upload G-code",
       description:
@@ -205,9 +207,18 @@ export function registerRpcSurface(
       parametersSchema: {
         type: "object",
         properties: {
-          filename: { type: "string" },
-          gcodeBase64: { type: "string" },
-          path: { type: "string" },
+          filename: {
+            type: "string",
+            pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}\\.gcode$",
+          },
+          gcodeBase64: {
+            type: "string",
+            description: "Base64-encoded G-code bytes.",
+          },
+          path: {
+            type: "string",
+            description: "Optional virtual_sdcard subdirectory.",
+          },
         },
         required: ["filename", "gcodeBase64"],
         additionalProperties: false,
@@ -238,7 +249,7 @@ export function registerRpcSurface(
   );
 
   ctx.tools.register(
-    "start_print",
+    "klipper.start_print",
     {
       displayName: "Klipper Start Print",
       description:
@@ -246,7 +257,13 @@ export function registerRpcSurface(
         "`allow_agent_initiated_print`.",
       parametersSchema: {
         type: "object",
-        properties: { filename: { type: "string" } },
+        properties: {
+          filename: {
+            type: "string",
+            pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}\\.gcode$",
+            description: "G-code filename to print (must already be uploaded).",
+          },
+        },
         required: ["filename"],
         additionalProperties: false,
       },
