@@ -1,0 +1,15 @@
+# pnpm settings — pnpm 10+ no longer reads the `pnpm` field in package.json.
+# See https://pnpm.io/settings for the new home of each setting.
+# `packages` must be declared even for single-package repos that only use this file for settings.
+packages:
+  - '.'
+
+# esbuild ships a postinstall that probes platform binaries. Trusted, allow.
+onlyBuiltDependencies:
+  - esbuild
+
+# Force fork-pinned `@paperclipai/shared` to the bundled tarball. The transitive
+# dependency comes from `@paperclipai/plugin-sdk` (also fork-pinned via tarball),
+# which references a fork-only version that does not exist on the public registry.
+overrides:
+  '@paperclipai/shared': 'file:.paperclip-sdk/paperclipai-shared-2026.428.1-fork.5.tgz'
