@@ -10,7 +10,7 @@ on:
     paths:
       - 'src/manifest.ts'
       - 'package.json'
-      - 'package-lock.json'
+      - 'pnpm-lock.yaml'
       - 'esbuild.config.mjs'
       - 'rollup.config.mjs'
       - 'scripts/validate-manifest.mjs'
@@ -22,7 +22,7 @@ on:
     paths:
       - 'src/manifest.ts'
       - 'package.json'
-      - 'package-lock.json'
+      - 'pnpm-lock.yaml'
       - 'esbuild.config.mjs'
       - 'rollup.config.mjs'
       - 'scripts/validate-manifest.mjs'
@@ -37,14 +37,17 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
-          cache: npm
-      - run: npm ci
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
       - name: Build manifest (and worker)
-        run: npm run build
+        run: pnpm run build
       - name: Run regression test (PLA-376)
-        run: npx vitest run --config ./vitest.config.ts tests/validate-manifest.spec.ts
+        run: pnpm exec vitest run --config ./vitest.config.ts tests/validate-manifest.spec.ts
       - name: Validate built manifest
-        run: npm run validate:manifest
+        run: pnpm run validate:manifest
