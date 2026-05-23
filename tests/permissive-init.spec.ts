@@ -52,7 +52,7 @@ describe("paperclip-klipper permissive init (PLA-502/503)", () => {
     await createKlipperWorker(harness.ctx, { autoStart: false });
     const result = await harness.executeTool<{
       data?: { error?: string; message?: string };
-    }>("get_printer_status", {});
+    }>("klipper.get_printer_status", {});
     expect(result.data?.error).toBe("prerequisite_missing");
     expect(result.data?.message).toMatch(/moonrakerBaseUrl/);
   });
@@ -68,7 +68,7 @@ describe("paperclip-klipper permissive init (PLA-502/503)", () => {
     await createKlipperWorker(harness.ctx, { autoStart: false });
     const result = await harness.executeTool<{
       data?: { error?: string };
-    }>("upload_gcode", {
+    }>("klipper.upload_gcode", {
       filename: "demo.gcode",
       gcodeBase64: Buffer.from("G28\n").toString("base64"),
     });
@@ -84,7 +84,7 @@ describe("paperclip-klipper permissive init (PLA-502/503)", () => {
     await createKlipperWorker(harness.ctx, { autoStart: false });
     const result = await harness.executeTool<{
       data?: { error?: string };
-    }>("start_print", { filename: "demo.gcode" });
+    }>("klipper.start_print", { filename: "demo.gcode" });
     expect(result.data?.error).toBe("prerequisite_missing");
   });
 
