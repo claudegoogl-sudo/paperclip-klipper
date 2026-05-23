@@ -20,6 +20,7 @@
  *   - Outbound traffic is restricted to the configured base URL — every URL
  *     this client builds is checked against the base host before fetching.
  */
+import { randomBytes } from "node:crypto";
 import type {
   PluginHttpClient,
   PluginSecretsClient,
@@ -353,29 +354,66 @@ export class MoonrakerClient {
   /**
    * POST /server/files/upload — multipart with `file` field.
    *
-   * Uses the platform's `FormData`/`Blob` (Node 18+/22). The host enforces
-   * `http.outbound`; the worker enforces the host scope.
+   * PLA-514: the plugin-sdk RPC channel does NOT preserve native fetch
+   * behavior for `FormData` bodies. `worker-rpc-host` serializes any
+   * non-string body via `String(body)` (yielding `"[object FormData]"`),
+   * which destroys the multipart envelope and drops the auto-synthesized
+   * `Content-Type: multipart/form-data; boundary=…` header. The result on
+   * Moonraker is `HTTP 500 ParseFailedException: Missing Content-Type
+   * header`.
+   *
+   * Fix: hand-roll the multipart body as a string and pass the matching
+   * `Content-Type` header explicitly. Bytes flow through as a latin1-encoded
+   * string so the SDK serializer is an identity pass-through; G-code is
+   * printable ASCII so the latin1↔UTF-8 trip is lossless.
+   *
+   * The host enforces `http.outbound`; the worker enforces the host scope.
    */
   async uploadGcode(
     filename: string,
     payload: Uint8Array | Blob,
     options: { path?: string; root?: string } = {},
   ): Promise<{ item: { path: string; root: string; size: number; modified: number }; print_started?: boolean }> {
-    const form = new FormData();
-    // Copy into a fresh ArrayBuffer to satisfy `BlobPart` (TS rejects
-    // Uint8Array views over SharedArrayBuffer-typed buffers).
-    const blob = payload instanceof Blob
+    const bytes: Uint8Array = payload instanceof Uint8Array
       ? payload
-      : new Blob([new Uint8Array(payload).slice().buffer as ArrayBuffer], {
-          type: "application/octet-stream",
-        });
-    form.set("file", blob, filename);
-    if (options.path) form.set("path", options.path);
-    if (options.root) form.set("root", options.root);
+      : new Uint8Array(await payload.arrayBuffer());
+
+    const boundary = `----paperclipFormBoundary${randomBytes(12).toString("hex")}`;
+    const CRLF = "\r\n";
+    // latin1 maps bytes 0x00-0xFF 1:1 into JS string code units, so the SDK's
+    // `String(body)` serializer is a no-op for transport. The host writes the
+    // string to the wire via Node's default UTF-8 encoder; G-code is ASCII,
+    // which is identical under latin1 and UTF-8.
+    const payloadStr = Buffer.from(bytes).toString("latin1");
+
+    const parts: string[] = [];
+    parts.push(`--${boundary}${CRLF}`);
+    parts.push(
+      `Content-Disposition: form-data; name="file"; filename="${filename}"${CRLF}`,
+    );
+    parts.push(`Content-Type: application/octet-stream${CRLF}${CRLF}`);
+    parts.push(payloadStr);
+    parts.push(CRLF);
+    if (options.path) {
+      parts.push(`--${boundary}${CRLF}`);
+      parts.push(`Content-Disposition: form-data; name="path"${CRLF}${CRLF}`);
+      parts.push(`${options.path}${CRLF}`);
+    }
+    if (options.root) {
+      parts.push(`--${boundary}${CRLF}`);
+      parts.push(`Content-Disposition: form-data; name="root"${CRLF}${CRLF}`);
+      parts.push(`${options.root}${CRLF}`);
+    }
+    parts.push(`--${boundary}--${CRLF}`);
+    const body = parts.join("");
+
     const result = await this.requestJson<{
       item: { path: string; root: string; size: number; modified: number };
       print_started?: boolean;
-    }>("POST", "/server/files/upload", { body: form });
+    }>("POST", "/server/files/upload", {
+      body,
+      headers: { "Content-Type": `multipart/form-data; boundary=${boundary}` },
+    });
     return result;
   }
 
@@ -494,12 +532,13 @@ export class MoonrakerClient {
   private async requestJson<T>(
     method: string,
     path: string,
-    init: { body?: BodyInit | null } = {},
+    init: { body?: BodyInit | null; headers?: Record<string, string> } = {},
   ): Promise<T> {
     const url = this.scopedUrl(path);
     const apiKey = await this.resolveApiKey();
     const headers: Record<string, string> = {
       Accept: "application/json",
+      ...(init.headers ?? {}),
     };
     if (apiKey) headers["X-Api-Key"] = apiKey;
     const requestInit: RequestInit = {
