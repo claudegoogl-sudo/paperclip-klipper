@@ -9,11 +9,13 @@ on:
   pull_request:
     paths:
       - 'src/manifest.ts'
+      - 'src/globals.d.ts'
       - 'package.json'
       - 'package-lock.json'
       - 'esbuild.config.mjs'
       - 'rollup.config.mjs'
       - 'scripts/validate-manifest.mjs'
+      - 'scripts/check-manifest-version.mjs'
       - 'tests/validate-manifest.spec.ts'
       - '.github/workflows/manifest-validate.yml'
   push:
@@ -21,11 +23,13 @@ on:
       - main
     paths:
       - 'src/manifest.ts'
+      - 'src/globals.d.ts'
       - 'package.json'
       - 'package-lock.json'
       - 'esbuild.config.mjs'
       - 'rollup.config.mjs'
       - 'scripts/validate-manifest.mjs'
+      - 'scripts/check-manifest-version.mjs'
       - 'tests/validate-manifest.spec.ts'
       - '.github/workflows/manifest-validate.yml'
 
@@ -48,3 +52,5 @@ jobs:
         run: npx vitest run --config ./vitest.config.ts tests/validate-manifest.spec.ts
       - name: Validate built manifest
         run: npm run validate:manifest
+      - name: Check manifest.version == package.json.version (PLA-526)
+        run: npm run check:manifest-version

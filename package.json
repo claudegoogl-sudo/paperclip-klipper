@@ -1,18 +1,20 @@
 {
   "name": "@platform/paperclip-klipper",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "packageManager": "pnpm@10.33.4",
   "type": "module",
   "private": true,
   "description": "Paperclip plugin for Klipper / Moonraker 3D printers",
   "scripts": {
     "build": "node ./esbuild.config.mjs",
+    "postbuild": "npm run check:manifest-version",
     "build:rollup": "rollup -c",
     "dev": "node ./esbuild.config.mjs --watch",
     "dev:ui": "paperclip-plugin-dev-server --root . --ui-dir dist/ui --port 4177",
     "test": "vitest run --config ./vitest.config.ts",
     "typecheck": "tsc --noEmit",
     "validate:manifest": "node ./scripts/validate-manifest.mjs",
+    "check:manifest-version": "node ./scripts/check-manifest-version.mjs",
     "prepack": "npm run build && npm run validate:manifest"
   },
   "paperclipPlugin": {
