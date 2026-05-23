@@ -31,10 +31,14 @@ import type { PaperclipPluginManifestV1 } from "@paperclipai/plugin-sdk";
  *                              expansion (governance ticket is still required
  *                              for any future additions).
  */
+// `__PLUGIN_VERSION__` is substituted at build time from
+// `package.json.version` by esbuild's `define` (see `esbuild.config.mjs`).
+// PLA-526 made `package.json.version` the single source of truth so the
+// installed plugin's reported version cannot drift from the package version.
 const manifest: PaperclipPluginManifestV1 = {
   id: "platform.klipper",
   apiVersion: 1,
-  version: "0.1.1",
+  version: __PLUGIN_VERSION__,
   displayName: "Klipper",
   description:
     "Paperclip plugin for Klipper / Moonraker 3D printers. Lets agents " +
