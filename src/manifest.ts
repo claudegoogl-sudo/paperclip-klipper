@@ -34,7 +34,7 @@ import type { PaperclipPluginManifestV1 } from "@paperclipai/plugin-sdk";
 const manifest: PaperclipPluginManifestV1 = {
   id: "platform.klipper",
   apiVersion: 1,
-  version: "0.1.0",
+  version: "0.1.1",
   displayName: "Klipper",
   description:
     "Paperclip plugin for Klipper / Moonraker 3D printers. Lets agents " +
