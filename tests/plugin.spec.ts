@@ -76,7 +76,7 @@ describe("paperclip-klipper config gates (PLA-474)", () => {
     const harness = createTestHarness({ manifest, capabilities: [...CAPABILITIES], config });
     await createKlipperWorker(harness.ctx, { autoStart: false });
     const result = await harness.executeTool<{ error?: string }>(
-      "upload_gcode",
+      "klipper.upload_gcode",
       { filename: "test.gcode", gcodeBase64: Buffer.from("G28\n").toString("base64") },
     );
     expect(result.error).toMatch(/auto_upload_artifacts/);
@@ -86,7 +86,7 @@ describe("paperclip-klipper config gates (PLA-474)", () => {
     const harness = createTestHarness({ manifest, capabilities: [...CAPABILITIES], config });
     await createKlipperWorker(harness.ctx, { autoStart: false });
     const result = await harness.executeTool<{ error?: string }>(
-      "start_print",
+      "klipper.start_print",
       { filename: "test.gcode" },
     );
     expect(result.error).toMatch(/allow_agent_initiated_print/);
@@ -124,7 +124,7 @@ describe("paperclip-klipper RPC surface (PLA-475)", () => {
     });
     await createKlipperWorker(harness.ctx, { autoStart: false });
     const result = await harness.executeTool<{ data?: { connection: { state: string } } }>(
-      "get_printer_status",
+      "klipper.get_printer_status",
       {},
     );
     expect(result.data?.connection.state).toBe("idle");
@@ -152,7 +152,7 @@ describe("paperclip-klipper RPC surface (PLA-475)", () => {
     });
     await createKlipperWorker(harness.ctx, { autoStart: false });
     const result = await harness.executeTool<{ data?: { item: { path: string } }; error?: string }>(
-      "upload_gcode",
+      "klipper.upload_gcode",
       {
         filename: "demo.gcode",
         gcodeBase64: Buffer.from("G28\n").toString("base64"),
@@ -170,7 +170,7 @@ describe("paperclip-klipper RPC surface (PLA-475)", () => {
     });
     await createKlipperWorker(harness.ctx, { autoStart: false });
     const result = await harness.executeTool<{ data?: { ok: boolean }; error?: string }>(
-      "start_print",
+      "klipper.start_print",
       { filename: "demo.gcode" },
     );
     expect(result.error).toBeUndefined();

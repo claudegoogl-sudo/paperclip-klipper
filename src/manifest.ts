@@ -130,22 +130,25 @@ const manifest: PaperclipPluginManifestV1 = {
       name: "klipper.upload_gcode",
       displayName: "Klipper Upload G-code",
       description:
-        "Stub — upload a G-code artifact to the printer's virtual_sdcard. " +
-        "Real implementation lands in 6.5. Gated on auto_upload_artifacts.",
+        "Upload a G-code artifact to the printer's virtual_sdcard. Gated " +
+        "on auto_upload_artifacts.",
       parametersSchema: {
         type: "object",
         properties: {
           filename: {
             type: "string",
             pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}\\.gcode$",
-            description: "Destination filename (must end in .gcode).",
           },
-          artifactId: {
+          gcodeBase64: {
             type: "string",
-            description: "Plugin artifact reference for the G-code payload.",
+            description: "Base64-encoded G-code bytes.",
+          },
+          path: {
+            type: "string",
+            description: "Optional virtual_sdcard subdirectory.",
           },
         },
-        required: ["filename", "artifactId"],
+        required: ["filename", "gcodeBase64"],
         additionalProperties: false,
       },
     },
