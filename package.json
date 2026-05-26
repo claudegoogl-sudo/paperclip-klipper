@@ -22,6 +22,10 @@
     "worker": "./dist/worker.js",
     "ui": "./dist/ui/"
   },
+  "files": [
+    "dist/",
+    "README.md"
+  ],
   "keywords": [
     "paperclip",
     "plugin",
