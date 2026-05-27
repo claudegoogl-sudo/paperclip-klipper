@@ -77,7 +77,10 @@ describe("paperclip-klipper config gates (PLA-474)", () => {
     await createKlipperWorker(harness.ctx, { autoStart: false });
     const result = await harness.executeTool<{ error?: string }>(
       "klipper.upload_gcode",
-      { filename: "test.gcode", gcodeBase64: Buffer.from("G28\n").toString("base64") },
+      {
+        filename: "test.gcode",
+        artifactId: "00000000-0000-0000-0000-000000000000",
+      },
     );
     expect(result.error).toMatch(/auto_upload_artifacts/);
   });
@@ -151,11 +154,29 @@ describe("paperclip-klipper RPC surface (PLA-475)", () => {
       config: { moonrakerBaseUrl: mock.baseUrl(), auto_upload_artifacts: true },
     });
     await createKlipperWorker(harness.ctx, { autoStart: false });
+    // PLA-574/576: the worker no longer accepts inline gcodeBase64. The host
+    // resolves `artifactId` server-side under the dispatching agent's identity
+    // and the bytes arrive via `runCtx.artifacts.fetch`. Stub that helper here
+    // so the test exercises the same code path the host runtime takes.
+    const artifactId = "11111111-1111-4111-8111-111111111111";
     const result = await harness.executeTool<{ data?: { item: { path: string } }; error?: string }>(
       "klipper.upload_gcode",
       {
         filename: "demo.gcode",
-        gcodeBase64: Buffer.from("G28\n").toString("base64"),
+        artifactId,
+      },
+      {
+        artifacts: {
+          async fetch(id) {
+            expect(id).toBe(artifactId);
+            return {
+              bytes: new TextEncoder().encode("G28\n"),
+              filename: "demo.gcode",
+              contentType: "application/octet-stream",
+              byteSize: 4,
+            };
+          },
+        },
       },
     );
     expect(result.error).toBeUndefined();

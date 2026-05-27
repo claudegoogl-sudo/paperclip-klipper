@@ -59,7 +59,11 @@ describe("paperclip-klipper permissive init (PLA-502/503)", () => {
 
   it("upload_gcode tool returns prerequisite_missing when unconfigured (before the auto-upload gate)", async () => {
     // Even when the upload gate would otherwise let the call through, the
-    // missing-config check must short-circuit first.
+    // missing-config check must short-circuit first — BEFORE the worker
+    // touches `runCtx.artifacts.fetch`. If a future regression flips the
+    // order and starts fetching the artifact before checking the client,
+    // this test will fail loudly (the stubbed fetch would never be called
+    // anyway, but the prereq-missing branch must remain first-line).
     const harness = createTestHarness({
       manifest,
       capabilities: [...CAPABILITIES],
@@ -70,7 +74,7 @@ describe("paperclip-klipper permissive init (PLA-502/503)", () => {
       data?: { error?: string };
     }>("klipper.upload_gcode", {
       filename: "demo.gcode",
-      gcodeBase64: Buffer.from("G28\n").toString("base64"),
+      artifactId: "00000000-0000-0000-0000-000000000000",
     });
     expect(result.data?.error).toBe("prerequisite_missing");
   });

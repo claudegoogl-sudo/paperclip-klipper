@@ -24,13 +24,14 @@ import { describe, expect, it } from "vitest";
 import { MoonrakerClient } from "../../src/worker/MoonrakerClient.js";
 import type {
   PluginHttpClient,
+  PluginHttpFetchInit,
   PluginLogger,
   PluginSecretsClient,
 } from "@paperclipai/plugin-sdk";
 
 interface RecordedCall {
   url: string;
-  init: RequestInit | undefined;
+  init: PluginHttpFetchInit | undefined;
 }
 
 function makeRecordingHttp(): { http: PluginHttpClient; calls: RecordedCall[] } {

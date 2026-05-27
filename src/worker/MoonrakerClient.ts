@@ -532,7 +532,13 @@ export class MoonrakerClient {
   private async requestJson<T>(
     method: string,
     path: string,
-    init: { body?: BodyInit | null; headers?: Record<string, string> } = {},
+    init: {
+      // Mirrors `PluginHttpFetchBody` from the plugin SDK (fork.9+). The host
+      // SDK only accepts string / binary / FormData bodies — not the broad DOM
+      // `BodyInit` (which would include `URLSearchParams`, `Blob`, streams).
+      body?: string | Uint8Array | ArrayBuffer | Buffer | FormData | null;
+      headers?: Record<string, string>;
+    } = {},
   ): Promise<T> {
     const url = this.scopedUrl(path);
     const apiKey = await this.resolveApiKey();
@@ -541,7 +547,7 @@ export class MoonrakerClient {
       ...(init.headers ?? {}),
     };
     if (apiKey) headers["X-Api-Key"] = apiKey;
-    const requestInit: RequestInit = {
+    const requestInit = {
       method,
       headers,
       body: init.body ?? null,
