@@ -155,7 +155,17 @@ const manifest: PaperclipPluginManifestV1 = {
           },
           path: {
             type: "string",
-            description: "Optional virtual_sdcard subdirectory.",
+            // PLA-615: allowlist a relative virtual_sdcard subdirectory — 1-4
+            // '/'-separated segments of [A-Za-z0-9._-], each starting
+            // alphanumeric. Structurally rejects a leading '/', '..'/'.'
+            // segments, backslashes and NUL so a caller cannot traverse out of
+            // the gcodes root. The worker re-validates (defense-in-depth).
+            pattern:
+              "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}(/[A-Za-z0-9][A-Za-z0-9._-]{0,63}){0,3}$",
+            description:
+              "Optional virtual_sdcard subdirectory. Relative path of 1-4 " +
+              "segments (no leading '/', no '..'); e.g. \"prints\" or " +
+              "\"prints/today\".",
           },
         },
         required: ["filename", "artifactId"],

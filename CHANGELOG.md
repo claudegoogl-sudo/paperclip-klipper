@@ -5,6 +5,38 @@ plugin follows semver against the host plugin API (PLA-526 keeps
 `package.json.version` and the manifest version in lockstep via the build
 `define`).
 
+## 0.1.8 — 2026-05-28 (PLA-615)
+
+### Security
+- `klipper.upload_gcode` now allowlists the optional `path` (virtual_sdcard
+  subdirectory) parameter against a `pattern` in both the manifest and the
+  worker-registered schema: 1-4 `/`-separated segments of `[A-Za-z0-9._-]`,
+  each starting alphanumeric. This structurally rejects a leading `/`,
+  `..`/`.` segments, backslashes and NUL so a caller cannot traverse out of
+  the gcodes root (defense-in-depth against path traversal / OWASP A01 into
+  Moonraker's `virtual_sdcard`).
+- The worker re-validates `path` at runtime (`uploadPathError`) **before** the
+  artifact fetch or upload and **rejects** — never sanitizes — an unsafe value
+  with a structured `ToolResult` error, so a missed/bypassed host schema check
+  still cannot forward a traversal sequence into Moonraker's upload `path`
+  form field. Rejections are logged at `warn`
+  (`klipper.upload_gcode.path_rejected`) with the reason for observability.
+
+### Notes
+- Pre-existing hardening surfaced during the v0.1.7 / PLA-612 security review
+  (PLA-614); it did **not** block the v0.1.7 install. Gated behind
+  `auto_upload_artifacts` and an identity-scoped `artifactId`.
+- Whether the target Moonraker build also normalizes/rejects `..` in the upload
+  `path` field is unverified against a live printer — the schema allowlist is
+  belt-and-suspenders regardless. Re-review by SecurityEngineer (PLA-614)
+  requested once schema + tests landed.
+
+### References
+- [PLA-615](../paperclipai/issues/PLA-615) — this hardening.
+- [PLA-614](../paperclipai/issues/PLA-614) — v0.1.7 security sign-off that
+  surfaced the finding.
+- [PLA-612](../paperclipai/issues/PLA-612) — v0.1.7 gunzip change reviewed.
+
 ## 0.1.7 — 2026-05-28 (PLA-612)
 
 ### Fixed

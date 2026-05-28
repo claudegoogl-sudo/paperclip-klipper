@@ -86,6 +86,45 @@ function prerequisiteMissingError(): Error {
   return err;
 }
 
+/**
+ * PLA-615: virtual_sdcard path-traversal hardening (defense-in-depth, OWASP
+ * A01). `klipper.upload_gcode`'s `path` is forwarded verbatim into Moonraker's
+ * multipart upload `path` form field, so a value like `../../config` could try
+ * to escape the gcodes root. The manifest + worker schema `pattern` already
+ * allowlists `path` at the host validation layer; this worker-side re-check
+ * means a missed or bypassed host validation still cannot push a traversal
+ * sequence onto the wire. We REJECT (never sanitize) — silently rewriting a
+ * path hides caller intent and can still surprise.
+ *
+ * Allowlist: 1-4 '/'-separated segments, each starting alphanumeric and ≤64
+ * chars drawn from `[A-Za-z0-9._-]`. That structurally excludes a leading '/',
+ * '..'/'.' segments, backslashes and NUL. Keep the regex equivalent to the
+ * `path` schema `pattern` in src/manifest.ts and the worker registration above
+ * (the manifest↔worker contract test guards the two schema copies; this
+ * constant mirrors them as the runtime backstop).
+ */
+const UPLOAD_PATH_PATTERN =
+  /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}(\/[A-Za-z0-9][A-Za-z0-9._-]{0,63}){0,3}$/;
+
+/**
+ * Return a human-readable reason the `path` is unsafe, or `null` when it is an
+ * acceptable relative subdirectory. The explicit denylist branches run before
+ * the allowlist so the caller gets a precise reason for the common bad cases.
+ */
+export function uploadPathError(path: string): string | null {
+  if (path.includes("\0")) return "contains a NUL byte";
+  if (path.includes("\\")) return "contains a backslash";
+  if (path.startsWith("/")) return "must be a relative subdirectory (no leading '/')";
+  if (path.includes("..")) return "contains a '..' traversal sequence";
+  if (!UPLOAD_PATH_PATTERN.test(path)) {
+    return (
+      "is not a safe virtual_sdcard subdirectory (allowed: 1-4 '/'-separated " +
+      "segments of [A-Za-z0-9._-], each starting alphanumeric)"
+    );
+  }
+  return null;
+}
+
 export function registerRpcSurface(
   ctx: PluginContext,
   options: RpcSurfaceOptions,
@@ -244,7 +283,17 @@ export function registerRpcSurface(
           },
           path: {
             type: "string",
-            description: "Optional virtual_sdcard subdirectory.",
+            // PLA-615: allowlist a relative virtual_sdcard subdirectory — 1-4
+            // '/'-separated segments of [A-Za-z0-9._-], each starting
+            // alphanumeric. Structurally rejects a leading '/', '..'/'.'
+            // segments, backslashes and NUL so a caller cannot traverse out of
+            // the gcodes root. The worker re-validates (defense-in-depth).
+            pattern:
+              "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}(/[A-Za-z0-9][A-Za-z0-9._-]{0,63}){0,3}$",
+            description:
+              "Optional virtual_sdcard subdirectory. Relative path of 1-4 " +
+              "segments (no leading '/', no '..'); e.g. \"prints\" or " +
+              "\"prints/today\".",
           },
         },
         required: ["filename", "artifactId"],
@@ -266,6 +315,21 @@ export function registerRpcSurface(
           artifactId: string;
           path?: string;
         };
+        // PLA-615: reject a traversal-y subdirectory before any artifact fetch
+        // or upload. Defense-in-depth over the schema `pattern`; an empty path
+        // means "no subdirectory" (matches MoonrakerClient's truthiness check)
+        // and is left to pass through untouched.
+        if (typeof path === "string" && path.length > 0) {
+          const reason = uploadPathError(path);
+          if (reason !== null) {
+            ctx.logger.warn("klipper.upload_gcode.path_rejected", {
+              filename,
+              path,
+              reason,
+            });
+            return { error: `upload_gcode: refused — path ${reason}.` };
+          }
+        }
         // PLA-574: the host resolves the attachment under the dispatching
         // agent's identity. The worker never base64-decodes inline bytes.
         const artifact = await runCtx.artifacts.fetch(artifactId);

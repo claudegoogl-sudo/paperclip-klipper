@@ -197,10 +197,10 @@ function setupGunzipHarness(opts: {
     maxInflatedGcodeBytes: opts.maxInflatedGcodeBytes,
   });
 
-  const exec = () =>
+  const exec = (extraParams: Record<string, unknown> = {}) =>
     harness.executeTool<{ data?: unknown; error?: string }>(
       "klipper.upload_gcode",
-      { filename: "demo.gcode", artifactId: GUNZIP_ARTIFACT_ID },
+      { filename: "demo.gcode", artifactId: GUNZIP_ARTIFACT_ID, ...extraParams },
       {
         artifacts: {
           async fetch(id: string) {
@@ -284,5 +284,77 @@ describe("klipper.upload_gcode — PLA-612 worker-side gunzip", () => {
           e.meta?.bomb === true,
       ),
     ).toBe(true);
+  });
+});
+
+/**
+ * PLA-615 virtual_sdcard path-traversal hardening (defense-in-depth, OWASP
+ * A01). The optional `path` subdirectory is forwarded verbatim into Moonraker's
+ * multipart upload `path` form field, so the worker must reject — never
+ * sanitize — any traversal-y value (`..`, leading `/`, backslash, NUL) BEFORE
+ * it fetches the artifact or reaches `client.uploadGcode`. A valid relative
+ * subdirectory must still pass through to the client unchanged, and omitting
+ * `path` must remain a no-op.
+ *
+ * These drive the same recording fake client as the gunzip suite (a plain,
+ * non-gzip artifact so a clean call reaches the client) and assert nothing was
+ * uploaded on rejection.
+ */
+describe("klipper.upload_gcode — PLA-615 virtual_sdcard path traversal hardening", () => {
+  const PLAIN = new TextEncoder().encode("G28\nG1 X1 Y1\nM104 S0\n");
+
+  it.each([
+    "../../etc",
+    "/abs/path",
+    "a/../../b",
+    "..",
+    "foo\\bar",
+    "x\0y",
+    "a/b/c/d/e", // exceeds the 4-segment depth bound
+  ])(
+    "rejects unsafe path %j before reaching client.uploadGcode",
+    async (badPath) => {
+      const { captured, exec } = setupGunzipHarness({ artifactBytes: PLAIN });
+      const result = await exec({ path: badPath });
+
+      expect(result.error).toBeDefined();
+      expect(result.error).toMatch(/refused/);
+      // Nothing was uploaded — rejection happens before client.uploadGcode.
+      expect(captured).toHaveLength(0);
+    },
+  );
+
+  it("emits a warn log carrying the rejection reason (observability)", async () => {
+    const { harness, captured, exec } = setupGunzipHarness({ artifactBytes: PLAIN });
+    const result = await exec({ path: "../../etc" });
+
+    expect(result.error).toBeDefined();
+    expect(captured).toHaveLength(0);
+    expect(
+      harness.logs.some(
+        (e) =>
+          e.level === "warn" &&
+          e.message === "klipper.upload_gcode.path_rejected" &&
+          typeof e.meta?.reason === "string",
+      ),
+    ).toBe(true);
+  });
+
+  it("accepts a valid nested subdirectory and forwards it to the client", async () => {
+    const { captured, exec } = setupGunzipHarness({ artifactBytes: PLAIN });
+    const result = await exec({ path: "prints/today" });
+
+    expect(result.error).toBeUndefined();
+    expect(captured).toHaveLength(1);
+    expect(captured[0]!.options.path).toBe("prints/today");
+  });
+
+  it("allows omitting path entirely (no subdirectory)", async () => {
+    const { captured, exec } = setupGunzipHarness({ artifactBytes: PLAIN });
+    const result = await exec();
+
+    expect(result.error).toBeUndefined();
+    expect(captured).toHaveLength(1);
+    expect(captured[0]!.options.path).toBeUndefined();
   });
 });
