@@ -5,6 +5,29 @@ plugin follows semver against the host plugin API (PLA-526 keeps
 `package.json.version` and the manifest version in lockstep via the build
 `define`).
 
+## 0.1.7 — 2026-05-28 (PLA-612)
+
+### Fixed
+- `klipper.upload_gcode` now transparently gunzips gzip-magic (`0x1f 0x8b`)
+  artifacts before handing the bytes to `MoonrakerClient.uploadGcode`. Real
+  prints exceed the 10 MB issue-attachment store ceiling, so only the gzipped
+  artifact fits the store (DPR-130: 3.0 MB gz → 14.24 MB raw); the v0.1.6
+  worker streamed those still-gzipped bytes to Moonraker, which are unprintable.
+  Plain (non-gzip) artifacts pass through byte-for-byte unchanged.
+
+### Security
+- Gzip-bomb guard: inflation runs through
+  `gunzipSync(bytes, { maxOutputLength: 64 MiB })`, which throws
+  `ERR_BUFFER_TOO_LARGE` *during* decompression once the output would cross the
+  cap — the bomb never fully materializes in memory. The handler catches the
+  cap error and returns a structured `ToolResult` error instead of throwing.
+  A corrupt-but-gzip-magic artifact is reported distinctly (not as a bomb).
+
+### References
+- [PLA-611](../paperclipai/issues/PLA-611) — parent (CTO).
+- [PLA-576](../paperclipai/issues/PLA-576) — v0.1.6 `artifactId` dispatch this
+  builds on (superseded PR #12).
+
 ## 0.1.6 — 2026-05-27 (PLA-576)
 
 ### Changed
