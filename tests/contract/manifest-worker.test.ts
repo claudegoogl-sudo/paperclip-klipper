@@ -6,9 +6,12 @@
  * `/api/plugins/tools/execute` call against `klipper.*` returned a 500
  * dispatch error. The host does NOT auto-namespace — registered names
  * MUST equal `manifest.tools[].name` verbatim. PLA-509 also surfaced
- * schema drift between manifest and worker (the manifest declared
+ * schema drift between manifest and worker (v0.1.0 manifest declared
  * `{filename, artifactId}` while the worker accepted
- * `{filename, gcodeBase64, path}`).
+ * `{filename, gcodeBase64, path}`); v0.1.1 aligned both to
+ * `{filename, gcodeBase64, path?}` as a hotfix, and PLA-576 / v0.1.6 lands
+ * the original artifactId contract once PLA-574 shipped
+ * `runCtx.artifacts.fetch`.
  *
  * This test boots `registerRpcSurface(stubCtx, …)` against a stub
  * PluginContext that records every `ctx.tools.register(name, schema, …)`

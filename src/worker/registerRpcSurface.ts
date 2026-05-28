@@ -13,6 +13,7 @@
  * connection state so the dashboard widget can render a "disconnected"
  * banner without an extra round-trip.
  */
+import { gunzipSync } from "node:zlib";
 import type { PluginContext, ToolResult } from "@paperclipai/plugin-sdk";
 import {
   MoonrakerClient,
@@ -21,6 +22,17 @@ import {
   type ConnectionStateSnapshot,
   type MoonrakerStatusSnapshot,
 } from "./MoonrakerClient.js";
+
+/**
+ * Upper bound on the *decompressed* g-code we will hand to Moonraker. Real
+ * prints exceed the 10 MB issue-attachment store ceiling, so only the gzipped
+ * artifact fits the store — the worker transparently inflates it here. This
+ * cap is the gzip-bomb guard: it is enforced *during* inflation via
+ * `gunzipSync(..., { maxOutputLength })`, which throws ERR_BUFFER_TOO_LARGE
+ * before a malicious archive can balloon into memory. Do NOT replace this with
+ * a post-inflation `bytes.length` check — that defeats the OOM protection.
+ */
+const MAX_INFLATED_GCODE_BYTES = 64 * 1024 * 1024; // 64 MB
 
 export interface KlipperConfig {
   moonrakerBaseUrl: string;
@@ -42,6 +54,13 @@ export interface RpcSurfaceOptions {
   emitStreamSnapshot?: (snapshot: MoonrakerStatusSnapshot) => void;
   /** Emit a connection-state event to the UI stream channel. */
   emitStreamConnection?: (state: ConnectionStateSnapshot) => void;
+  /**
+   * Decompressed-g-code cap enforced during gunzip of gzip-magic artifacts in
+   * `klipper.upload_gcode`. Defaults to {@link MAX_INFLATED_GCODE_BYTES}; tests
+   * inject a tiny value to exercise the bomb-guard rejection without allocating
+   * a real >64 MB payload.
+   */
+  maxInflatedGcodeBytes?: number;
 }
 
 const CONFIG_GATE_AUTO_UPLOAD = "auto_upload_artifacts";
@@ -73,6 +92,8 @@ export function registerRpcSurface(
 ): void {
   const { config, client } = options;
   const configured = client !== null && Boolean(config.moonrakerBaseUrl);
+  const maxInflatedGcodeBytes =
+    options.maxInflatedGcodeBytes ?? MAX_INFLATED_GCODE_BYTES;
 
   // ── ctx.data ────────────────────────────────────────────────────────────
   // Always register the data keys (the page slot expects them to exist even
@@ -202,8 +223,10 @@ export function registerRpcSurface(
     {
       displayName: "Klipper Upload G-code",
       description:
-        "Upload a G-code artifact to the printer's virtual_sdcard. Gated on " +
-        "`auto_upload_artifacts`.",
+        "Upload a G-code artifact to the printer's virtual_sdcard. The worker " +
+        "resolves `artifactId` via `runCtx.artifacts.fetch` and streams the " +
+        "bytes straight to Moonraker — callers never base64-encode the " +
+        "payload through tool arguments. Gated on `auto_upload_artifacts`.",
       parametersSchema: {
         type: "object",
         properties: {
@@ -211,20 +234,24 @@ export function registerRpcSurface(
             type: "string",
             pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}\\.gcode$",
           },
-          gcodeBase64: {
+          artifactId: {
             type: "string",
-            description: "Base64-encoded G-code bytes.",
+            format: "uuid",
+            description:
+              "Paperclip attachment UUID to upload. Resolved server-side via " +
+              "the dispatching agent's identity (PLA-574); the plugin worker " +
+              "never sees the bytes inline.",
           },
           path: {
             type: "string",
             description: "Optional virtual_sdcard subdirectory.",
           },
         },
-        required: ["filename", "gcodeBase64"],
+        required: ["filename", "artifactId"],
         additionalProperties: false,
       },
     },
-    async (params, _runCtx): Promise<ToolResult> => {
+    async (params, runCtx): Promise<ToolResult> => {
       if (!client) return prerequisiteMissingToolResult();
       if (config.auto_upload_artifacts !== true) {
         return {
@@ -234,12 +261,50 @@ export function registerRpcSurface(
         };
       }
       try {
-        const { filename, gcodeBase64, path } = params as {
+        const { filename, artifactId, path } = params as {
           filename: string;
-          gcodeBase64: string;
+          artifactId: string;
           path?: string;
         };
-        const bytes = Uint8Array.from(Buffer.from(gcodeBase64, "base64"));
+        // PLA-574: the host resolves the attachment under the dispatching
+        // agent's identity. The worker never base64-decodes inline bytes.
+        const artifact = await runCtx.artifacts.fetch(artifactId);
+        // PLA-612: real prints only fit the 10 MB attachment store when
+        // gzipped, but Moonraker needs the plain g-code. Transparently inflate
+        // gzip-magic (0x1f 0x8b) artifacts; plain artifacts pass through
+        // untouched. The bomb guard is enforced DURING inflation via
+        // `maxOutputLength` so a malicious archive cannot balloon into memory.
+        let bytes: Uint8Array = artifact.bytes;
+        if (bytes.length >= 2 && bytes[0] === 0x1f && bytes[1] === 0x8b) {
+          try {
+            bytes = gunzipSync(bytes, { maxOutputLength: maxInflatedGcodeBytes });
+          } catch (err) {
+            const code = (err as NodeJS.ErrnoException).code;
+            // ERR_BUFFER_TOO_LARGE is thrown mid-inflation once the output
+            // would cross the cap — the bomb guard fired. Any other error means
+            // the artifact carried gzip magic but was not valid gzip.
+            const bomb = code === "ERR_BUFFER_TOO_LARGE";
+            ctx.logger.warn("klipper.upload_gcode.gunzip_failed", {
+              filename,
+              gzBytes: artifact.bytes.length,
+              maxInflatedGcodeBytes,
+              code,
+              bomb,
+            });
+            return {
+              error: bomb
+                ? `upload_gcode: refused — decompressed g-code exceeds the ` +
+                  `${maxInflatedGcodeBytes}-byte cap (possible gzip bomb).`
+                : `upload_gcode: refused — artifact has gzip magic but could ` +
+                  `not be decompressed (${code ?? "unknown error"}).`,
+            };
+          }
+          ctx.logger.info("klipper.upload_gcode.gunzip", {
+            filename,
+            gzBytes: artifact.bytes.length,
+            inflatedBytes: bytes.length,
+          });
+        }
         const result = await client.uploadGcode(filename, bytes, { path });
         return { data: result };
       } catch (err) {

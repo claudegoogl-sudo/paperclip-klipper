@@ -11,7 +11,7 @@ on:
       - 'src/manifest.ts'
       - 'src/globals.d.ts'
       - 'package.json'
-      - 'package-lock.json'
+      - 'pnpm-lock.yaml'
       - 'esbuild.config.mjs'
       - 'rollup.config.mjs'
       - 'scripts/validate-manifest.mjs'
@@ -25,7 +25,7 @@ on:
       - 'src/manifest.ts'
       - 'src/globals.d.ts'
       - 'package.json'
-      - 'package-lock.json'
+      - 'pnpm-lock.yaml'
       - 'esbuild.config.mjs'
       - 'rollup.config.mjs'
       - 'scripts/validate-manifest.mjs'
@@ -41,16 +41,21 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.33.4
+          run_install: false
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
-          cache: npm
-      - run: npm ci
+          cache: 'pnpm'
+          cache-dependency-path: pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
       - name: Build manifest (and worker)
-        run: npm run build
+        run: pnpm run build
       - name: Run regression test (PLA-376)
-        run: npx vitest run --config ./vitest.config.ts tests/validate-manifest.spec.ts
+        run: pnpm exec vitest run --config ./vitest.config.ts tests/validate-manifest.spec.ts
       - name: Validate built manifest
-        run: npm run validate:manifest
+        run: pnpm run validate:manifest
       - name: Check manifest.version == package.json.version (PLA-526)
-        run: npm run check:manifest-version
+        run: pnpm run check:manifest-version
