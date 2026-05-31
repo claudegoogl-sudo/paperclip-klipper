@@ -72,9 +72,6 @@ function makeStubSecrets(): PluginSecretsClient {
     async resolve(_ref: string, _runId: string) {
       return "stub-secret";
     },
-    async mintHandle(_value: string, _runId: string) {
-      return "stub-handle";
-    },
   };
 }
 
