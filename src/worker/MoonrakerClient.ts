@@ -373,6 +373,7 @@ export class MoonrakerClient {
     filename: string,
     payload: Uint8Array | Blob,
     options: { path?: string; root?: string } = {},
+    runId?: string,
   ): Promise<{ item: { path: string; root: string; size: number; modified: number }; print_started?: boolean }> {
     const bytes: Uint8Array = payload instanceof Uint8Array
       ? payload
@@ -413,15 +414,17 @@ export class MoonrakerClient {
     }>("POST", "/server/files/upload", {
       body,
       headers: { "Content-Type": `multipart/form-data; boundary=${boundary}` },
-    });
+    }, runId);
     return result;
   }
 
   /** POST /printer/print/start?filename=<filename> */
-  async startPrint(filename: string): Promise<string> {
+  async startPrint(filename: string, runId?: string): Promise<string> {
     const result = await this.requestJson<{ result: string }>(
       "POST",
       `/printer/print/start?filename=${encodeURIComponent(filename)}`,
+      {},
+      runId,
     );
     return result.result;
   }
@@ -523,10 +526,19 @@ export class MoonrakerClient {
    * Resolve API key once and pass it to the caller. Caller is responsible for
    * NOT logging it. The string is held in a local for the lifetime of one
    * call and dropped on return.
+   *
+   * fork.10 SDK requires a `runId` on `secrets.resolve` so the host can
+   * re-derive the dispatching company and authorize the ref. Tool dispatches
+   * thread `runCtx.runId` down to here. Background paths (WS (re)connect at
+   * setup/reconnect, UI `getData` reads, `performAction` bridges) have no
+   * in-hand tool runId; forwarding `undefined` makes the SDK omit it on the
+   * wire so the host back-fills `runId` from the validated
+   * `PluginInvocationScope` (executeTool/performAction), failing closed only
+   * when there is genuinely no active dispatch.
    */
-  private async resolveApiKey(): Promise<string | null> {
+  private async resolveApiKey(runId?: string): Promise<string | null> {
     if (!this.opts.apiKeyRef) return null;
-    return this.opts.secrets.resolve(this.opts.apiKeyRef);
+    return this.opts.secrets.resolve(this.opts.apiKeyRef, runId as string);
   }
 
   private async requestJson<T>(
@@ -539,9 +551,10 @@ export class MoonrakerClient {
       body?: string | Uint8Array | ArrayBuffer | Buffer | FormData | null;
       headers?: Record<string, string>;
     } = {},
+    runId?: string,
   ): Promise<T> {
     const url = this.scopedUrl(path);
-    const apiKey = await this.resolveApiKey();
+    const apiKey = await this.resolveApiKey(runId);
     const headers: Record<string, string> = {
       Accept: "application/json",
       ...(init.headers ?? {}),

@@ -12,4 +12,4 @@ onlyBuiltDependencies:
 # dependency comes from `@paperclipai/plugin-sdk` (also fork-pinned via tarball),
 # which references a fork-only version that does not exist on the public registry.
 overrides:
-  '@paperclipai/shared': 'file:.paperclip-sdk/paperclipai-shared-2026.428.1-fork.9.tgz'
+  '@paperclipai/shared': 'file:.paperclip-sdk/paperclipai-shared-2026.428.1-fork.10.tgz'

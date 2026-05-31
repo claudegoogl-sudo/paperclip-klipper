@@ -69,8 +69,11 @@ function makeNoopLogger(): PluginLogger {
 
 function makeStubSecrets(): PluginSecretsClient {
   return {
-    async resolve(_ref: string) {
+    async resolve(_ref: string, _runId: string) {
       return "stub-secret";
+    },
+    async mintHandle(_value: string, _runId: string) {
+      return "stub-handle";
     },
   };
 }

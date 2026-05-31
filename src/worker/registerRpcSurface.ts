@@ -369,7 +369,7 @@ export function registerRpcSurface(
             inflatedBytes: bytes.length,
           });
         }
-        const result = await client.uploadGcode(filename, bytes, { path });
+        const result = await client.uploadGcode(filename, bytes, { path }, runCtx.runId);
         return { data: result };
       } catch (err) {
         return toolError(err, "upload_gcode");
@@ -397,7 +397,7 @@ export function registerRpcSurface(
         additionalProperties: false,
       },
     },
-    async (params): Promise<ToolResult> => {
+    async (params, runCtx): Promise<ToolResult> => {
       if (!client) return prerequisiteMissingToolResult();
       if (config.allow_agent_initiated_print !== true) {
         return {
@@ -408,7 +408,7 @@ export function registerRpcSurface(
       }
       try {
         const { filename } = params as { filename: string };
-        const result = await client.startPrint(filename);
+        const result = await client.startPrint(filename, runCtx.runId);
         return { data: { ok: true, result } };
       } catch (err) {
         return toolError(err, "start_print");
