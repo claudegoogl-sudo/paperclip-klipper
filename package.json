@@ -36,8 +36,8 @@
   "author": "Platform",
   "license": "MIT",
   "devDependencies": {
-    "@paperclipai/plugin-sdk": "file:.paperclip-sdk/paperclipai-plugin-sdk-2026.428.1-fork.10.tgz",
-    "@paperclipai/shared": "file:.paperclip-sdk/paperclipai-shared-2026.428.1-fork.10.tgz",
+    "@paperclipai/plugin-sdk": "file:.paperclip-sdk/paperclipai-plugin-sdk-2026.428.1-fork.9.tgz",
+    "@paperclipai/shared": "file:.paperclip-sdk/paperclipai-shared-2026.428.1-fork.9.tgz",
     "@rollup/plugin-node-resolve": "^16.0.1",
     "@rollup/plugin-typescript": "^12.1.2",
     "@testing-library/dom": "^10.4.1",
