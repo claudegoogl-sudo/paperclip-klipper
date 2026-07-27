@@ -27,16 +27,27 @@ const define = {
 const presets = createPluginBundlerPresets({ uiEntry: "src/ui/index.tsx" });
 const watch = process.argv.includes("--watch");
 
+// The SDK preset defaults to `sourcemap: true`, which embeds every original
+// TypeScript file — ours plus the vendored host packages — into `dist/*.map`
+// as `sourcesContent`. `package.json` ships `dist/` verbatim, so the released
+// tarball carried our full source. "external" keeps the map on disk for local
+// debugging but drops the `//# sourceMappingURL=` footer; the `files`
+// negation keeps `dist/**/*.map` out of the package.
+const sourcemap = "external";
+
 const workerCtx = await esbuild.context({
   ...presets.esbuild.worker,
+  sourcemap,
   define: { ...(presets.esbuild.worker.define ?? {}), ...define },
 });
 const manifestCtx = await esbuild.context({
   ...presets.esbuild.manifest,
+  sourcemap,
   define: { ...(presets.esbuild.manifest.define ?? {}), ...define },
 });
 const uiCtx = await esbuild.context({
   ...presets.esbuild.ui,
+  sourcemap,
   define: { ...(presets.esbuild.ui.define ?? {}), ...define },
 });
 
