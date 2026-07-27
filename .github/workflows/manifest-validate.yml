@@ -17,6 +17,7 @@ on:
       - 'scripts/validate-manifest.mjs'
       - 'scripts/check-manifest-version.mjs'
       - 'tests/validate-manifest.spec.ts'
+      - 'tests/no-published-sourcemaps.spec.ts'
       - '.github/workflows/manifest-validate.yml'
   push:
     branches:
@@ -31,6 +32,7 @@ on:
       - 'scripts/validate-manifest.mjs'
       - 'scripts/check-manifest-version.mjs'
       - 'tests/validate-manifest.spec.ts'
+      - 'tests/no-published-sourcemaps.spec.ts'
       - '.github/workflows/manifest-validate.yml'
 
 jobs:
@@ -59,3 +61,5 @@ jobs:
         run: pnpm run validate:manifest
       - name: Check manifest.version == package.json.version (PLA-526)
         run: pnpm run check:manifest-version
+      - name: Assert the packed tarball ships no sourcemaps
+        run: pnpm exec vitest run --config ./vitest.config.ts tests/no-published-sourcemaps.spec.ts
