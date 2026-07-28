@@ -36,6 +36,12 @@ const MAX_INFLATED_GCODE_BYTES = 64 * 1024 * 1024; // 64 MB
 
 export interface KlipperConfig {
   moonrakerBaseUrl: string;
+  /**
+   * Operator-configurable host allowlist for `moonrakerBaseUrl` (PLA safety
+   * follow-up). When omitted or empty, defaults to the single host parsed
+   * out of `moonrakerBaseUrl` itself — see `validateMoonrakerBaseUrl.ts`.
+   */
+  moonrakerAllowedHosts?: string[];
   moonrakerApiKeyRef?: string;
   auto_upload_artifacts?: boolean;
   allow_agent_initiated_print?: boolean;
