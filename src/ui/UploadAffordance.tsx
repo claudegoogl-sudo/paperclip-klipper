@@ -1,5 +1,5 @@
 /**
- * Upload affordance — section 4 of the Klipper page UI (PLA-480 / §6.4 rev-4).
+ * Upload affordance — section 4 of the Klipper page UI (see §6.4 rev-4).
  *
  * Native `<input type="file">` picker → base64-encoded upload via
  * `usePluginAction('upload_gcode')`. Inline success/failure surface (no
@@ -9,9 +9,9 @@
  * Auto-upload-flag gate is enforced worker-side; the verbatim worker error
  * is surfaced here without rewording (UX: no dark patterns).
  *
- * **Worker contract dependency:** the `upload_gcode` action is filed in
- * PLA-504. Until it lands, `usePluginAction('upload_gcode')` resolves with
- * the SDK's "unknown action" error, which we surface verbatim.
+ * **Worker contract dependency:** the `upload_gcode` action is tracked as a
+ * follow-up item. Until it lands, `usePluginAction('upload_gcode')` resolves
+ * with the SDK's "unknown action" error, which we surface verbatim.
  */
 import { useEffect, useRef, useState } from "react";
 import { usePluginAction, usePluginData } from "@paperclipai/plugin-sdk/ui";

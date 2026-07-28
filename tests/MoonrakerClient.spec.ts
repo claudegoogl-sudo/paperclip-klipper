@@ -1,5 +1,5 @@
 /**
- * MoonrakerClient unit tests (PLA-475 / Workstream 6.3).
+ * MoonrakerClient unit tests (Workstream 6.3).
  *
  * Covers the acceptance criteria from the issue:
  *   - REST methods exercise the mock Moonraker fixture.
@@ -43,7 +43,7 @@ interface RecordedStreamEvent {
 
 /**
  * Narrow `createKlipperWorker`'s `client: MoonrakerClient | null` return
- * (the null branch landed in PLA-502/503 for permissive init) for tests that
+ * (the null branch handles permissive init) for tests that
  * have configured `moonrakerBaseUrl` and therefore expect a real client.
  */
 function expectClient<T extends { client: unknown }>(worker: T): T & { client: NonNullable<T["client"]> } {

@@ -53,7 +53,7 @@ export interface RpcSurfaceOptions {
    * MoonrakerClient or `null` when the worker started without
    * `moonrakerBaseUrl` configured. When `null`, every handler short-circuits
    * with a `prerequisite_missing` result rather than dereferencing the
-   * client. See PLA-502/503 (permissive init, matches CAD pattern).
+   * client. See the permissive-init pattern (matches the CAD plugin).
    */
   client: MoonrakerClient | null;
   /** Emit a status snapshot to the UI stream channel used by `usePluginStream`. */
@@ -93,7 +93,7 @@ function prerequisiteMissingError(): Error {
 }
 
 /**
- * PLA-615: virtual_sdcard path-traversal hardening (defense-in-depth, OWASP
+ * virtual_sdcard path-traversal hardening (defense-in-depth, OWASP
  * A01). `klipper.upload_gcode`'s `path` is forwarded verbatim into Moonraker's
  * multipart upload `path` form field, so a value like `../../config` could try
  * to escape the gcodes root. The manifest + worker schema `pattern` already
@@ -284,12 +284,12 @@ export function registerRpcSurface(
             format: "uuid",
             description:
               "Paperclip attachment UUID to upload. Resolved server-side via " +
-              "the dispatching agent's identity (PLA-574); the plugin worker " +
+              "the dispatching agent's identity; the plugin worker " +
               "never sees the bytes inline.",
           },
           path: {
             type: "string",
-            // PLA-615: allowlist a relative virtual_sdcard subdirectory — 1-4
+            // Allowlist a relative virtual_sdcard subdirectory — 1-4
             // '/'-separated segments of [A-Za-z0-9._-], each starting
             // alphanumeric. Structurally rejects a leading '/', '..'/'.'
             // segments, backslashes and NUL so a caller cannot traverse out of
@@ -321,7 +321,7 @@ export function registerRpcSurface(
           artifactId: string;
           path?: string;
         };
-        // PLA-615: reject a traversal-y subdirectory before any artifact fetch
+        // Reject a traversal-y subdirectory before any artifact fetch
         // or upload. Defense-in-depth over the schema `pattern`; an empty path
         // means "no subdirectory" (matches MoonrakerClient's truthiness check)
         // and is left to pass through untouched.
@@ -336,10 +336,10 @@ export function registerRpcSurface(
             return { error: `upload_gcode: refused — path ${reason}.` };
           }
         }
-        // PLA-574: the host resolves the attachment under the dispatching
+        // The host resolves the attachment under the dispatching
         // agent's identity. The worker never base64-decodes inline bytes.
         const artifact = await runCtx.artifacts.fetch(artifactId);
-        // PLA-612: real prints only fit the 10 MB attachment store when
+        // Real prints only fit the 10 MB attachment store when
         // gzipped, but Moonraker needs the plain g-code. Transparently inflate
         // gzip-magic (0x1f 0x8b) artifacts; plain artifacts pass through
         // untouched. The bomb guard is enforced DURING inflation via

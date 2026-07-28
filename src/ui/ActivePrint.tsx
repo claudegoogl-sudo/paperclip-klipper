@@ -1,12 +1,12 @@
 /**
- * Active print panel — section 4 of the Klipper page UI (PLA-480 / §6.4).
+ * Active print panel — section 4 of the Klipper page UI (see §6.4).
  *
  * Reads the status snapshot from `usePluginData('status')`. The parent Page
  * elevates this panel above the queue when `print_stats.state ∈ {printing,
  * paused}` so progress/Cancel are above the fold on a 390px viewport.
  *
  * Pause and Resume share a button slot; the label flips on `state ===
- * 'paused'`. PLA-482 introduced a discrete `resume_print` action so the
+ * 'paused'`. A discrete `resume_print` action was introduced so the
  * resume path no longer relies on Moonraker's server-side pause toggle.
  */
 import { useEffect, useState } from "react";

@@ -7,11 +7,12 @@ import { MockMoonraker } from "./fixtures/moonraker/mockServer.js";
 /**
  * Plugin-level scaffold + RPC surface tests.
  *
- * PLA-474 contributed the manifest shape and the config-gate refusals on the
- * high-blast-radius tools; those are still asserted here so the gates can
- * never silently regress. PLA-475 added MoonrakerClient and a real RPC
- * surface — the data/action/tool happy-path assertions now go through the
- * mock Moonraker fixture instead of returning a `todo` stub.
+ * The original scaffold contributed the manifest shape and the config-gate
+ * refusals on the high-blast-radius tools; those are still asserted here so
+ * the gates can never silently regress. A later revision added
+ * MoonrakerClient and a real RPC surface — the data/action/tool happy-path
+ * assertions now go through the mock Moonraker fixture instead of returning
+ * a `todo` stub.
  *
  * Full MoonrakerClient coverage (REST, WS, reconnect, redaction) lives in
  * `MoonrakerClient.spec.ts`.
@@ -25,7 +26,7 @@ const CAPABILITIES = [
   "events.emit",
 ] as const;
 
-describe("paperclip-klipper manifest (PLA-474)", () => {
+describe("paperclip-klipper manifest", () => {
   it("declares the required surface", () => {
     expect(manifest.id).toBe("platform.klipper");
     expect(manifest.apiVersion).toBe(1);
@@ -38,8 +39,8 @@ describe("paperclip-klipper manifest (PLA-474)", () => {
         "ui.page.register",
       ]),
     );
-    // PLA-480 — capability count must stay at five (issue AC §1). The
-    // PLA-473 Q1 resolution swapped `ui.dashboardWidget.register` for
+    // Capability count must stay at five (issue AC §1). The Q1
+    // resolution swapped `ui.dashboardWidget.register` for
     // `ui.page.register`; no net addition.
     expect(manifest.capabilities).toHaveLength(5);
     expect(manifest.capabilities).not.toContain("ui.dashboardWidget.register");
@@ -67,7 +68,7 @@ describe("paperclip-klipper manifest (PLA-474)", () => {
   });
 });
 
-describe("paperclip-klipper config gates (PLA-474)", () => {
+describe("paperclip-klipper config gates", () => {
   // These tests don't need a mock Moonraker — the gates refuse before any
   // network call is made, so we can run them against a never-bound URL.
   const config = { moonrakerBaseUrl: "http://127.0.0.1:1" };
@@ -107,7 +108,7 @@ describe("paperclip-klipper config gates (PLA-474)", () => {
   });
 });
 
-describe("paperclip-klipper RPC surface (PLA-475)", () => {
+describe("paperclip-klipper RPC surface", () => {
   let mock: MockMoonraker;
 
   beforeEach(async () => {
@@ -154,7 +155,7 @@ describe("paperclip-klipper RPC surface (PLA-475)", () => {
       config: { moonrakerBaseUrl: mock.baseUrl(), auto_upload_artifacts: true },
     });
     await createKlipperWorker(harness.ctx, { autoStart: false });
-    // PLA-574/576: the worker no longer accepts inline gcodeBase64. The host
+    // The worker no longer accepts inline gcodeBase64. The host
     // resolves `artifactId` server-side under the dispatching agent's identity
     // and the bytes arrive via `runCtx.artifacts.fetch`. Stub that helper here
     // so the test exercises the same code path the host runtime takes.
@@ -210,7 +211,7 @@ describe("paperclip-klipper RPC surface (PLA-475)", () => {
   });
 });
 
-describe("paperclip-klipper UI actions (PLA-482)", () => {
+describe("paperclip-klipper UI actions", () => {
   // The actions registered for the UI buttons (start_print, delete_file,
   // resume_print) are intentionally NOT gated on `allow_agent_initiated_print`
   // — the user tap is the consent signal. Each action gets a success path

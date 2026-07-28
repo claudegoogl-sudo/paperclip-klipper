@@ -1,5 +1,5 @@
 /**
- * Connection banner — section 1 of the Klipper page UI (PLA-480 / §6.4).
+ * Connection banner — section 1 of the Klipper page UI (see §6.4).
  *
  * Reads `connection` shape from the worker (registerRpcSurface.ts) and
  * renders only the states the user can act on or wait for. `idle` and
@@ -37,8 +37,8 @@ export function ConnectionBanner({ connection, onReconnected }: ConnectionBanner
   // design — see UX spec §1.
   if (state === "idle" || state === "connected") return null;
 
-  // Needs-config / unconfigured — PLA-502 follow-up. Until PLA-502 lands
-  // the exact signal shape, the Page also performs a top-level short-circuit
+  // Needs-config / unconfigured — a follow-up item. Until the exact signal
+  // shape lands, the Page also performs a top-level short-circuit
   // for the full-replace card; this branch covers the "preferred" surface
   // where the worker emits `connection.state === "unconfigured"`.
   if ((state as string) === "unconfigured") {

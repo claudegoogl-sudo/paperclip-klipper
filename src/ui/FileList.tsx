@@ -1,5 +1,5 @@
 /**
- * Recent uploads / queue — section 3 of the Klipper page UI (PLA-480 / §6.4).
+ * Recent uploads / queue — section 3 of the Klipper page UI (see §6.4).
  *
  * Mobile-first single-column list (not a `<table>`); each row is a `<li>`
  * with metadata + a trailing inline Start button (≥44px tap target). Per

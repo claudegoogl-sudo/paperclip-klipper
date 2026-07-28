@@ -15,9 +15,9 @@ import { validateMoonrakerBaseUrl } from "./worker/validateMoonrakerBaseUrl.js";
 /**
  * paperclip-klipper worker.
  *
- * PLA-475 wires the real MoonrakerClient (REST + WS, reconnect, RPC surface)
- * onto the ctx surfaces declared by the manifest. Earlier scaffold from
- * PLA-474 stayed stub-only; this revision replaces the stubs with the real
+ * This revision wires the real MoonrakerClient (REST + WS, reconnect, RPC
+ * surface) onto the ctx surfaces declared by the manifest. The earlier
+ * scaffold stayed stub-only; this revision replaces the stubs with the real
  * transport while keeping the same config gates on high-blast-radius tools.
  *
  * Notes carried from the plan:
@@ -63,7 +63,7 @@ export interface KlipperWorker {
    * MoonrakerClient instance, or `null` when the worker started without
    * `moonrakerBaseUrl` set. Tool / action / data handlers must gate on
    * client presence and surface `prerequisite_missing` (mirroring the CAD
-   * plugin pattern — see PLA-502/503).
+   * plugin pattern).
    */
   client: MoonrakerClient | null;
   config: KlipperConfig;
@@ -82,7 +82,7 @@ export async function createKlipperWorker(
   const config = rawConfig as Partial<KlipperConfig>;
   const rawBaseUrl = config.moonrakerBaseUrl;
   if (!rawBaseUrl) {
-    // Permissive init (PLA-502/503): worker initializes without
+    // Permissive init: worker initializes without
     // `moonrakerBaseUrl` so the host sees a healthy worker, `plugin install`
     // exits 0, and the page slot mounts. Tool / action / data handlers gate
     // on config presence at call time and return `prerequisite_missing`.
@@ -176,7 +176,7 @@ export async function createKlipperWorker(
 
 const plugin = definePlugin({
   async setup(ctx) {
-    // Skip auto-start under Vitest so the PLA-474 scaffold tests don't try
+    // Skip auto-start under Vitest so the scaffold tests don't try
     // to open a real WebSocket against a fake hostname. Tests that exercise
     // the WS path use `createKlipperWorker` directly with the mock server.
     const inVitest = process.env.VITEST === "true";

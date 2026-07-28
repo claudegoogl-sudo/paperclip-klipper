@@ -1,5 +1,5 @@
 /**
- * PLA-526 — build-time-injected globals.
+ * Build-time-injected globals.
  *
  * `__PLUGIN_VERSION__` is substituted at build time by esbuild's `define`
  * (see `esbuild.config.mjs`) from `package.json.version`, giving the

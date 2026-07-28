@@ -1,5 +1,5 @@
 /**
- * paperclip-klipper plugin UI — PLA-480 / §6.4 (rev-4, full printer page).
+ * paperclip-klipper plugin UI — §6.4 (rev-4, full printer page).
  *
  * Exports the `Page` component bound to the host `page` slot at
  * `/:companyPrefix/printer` (e.g. `/PLA/printer`). The orchestrator pulls
@@ -46,7 +46,7 @@ interface ConfigDataSnapshot {
 }
 
 /**
- * Rendered when the worker started without `moonrakerBaseUrl` (PLA-502/503).
+ * Rendered when the worker started without `moonrakerBaseUrl`.
  * Functional CTA only — UX polish is intentionally out of scope per the
  * issue brief.
  */
@@ -76,7 +76,7 @@ function NeedsConfigPlaceholder() {
  * (id: `klipper-page`, exportName: `Page`, routePath: `printer`).
  */
 export function Page(_props: PluginPageProps) {
-  // PLA-502/503: branch on plugin config presence. When the worker started
+  // Branch on plugin config presence. When the worker started
   // without `moonrakerBaseUrl` the page slot renders a needs-config CTA
   // instead of trying to read status/files (which would no-op anyway).
   const configData = usePluginData<ConfigDataSnapshot>("config");
@@ -96,7 +96,7 @@ export function Page(_props: PluginPageProps) {
 
   const initialStatusLoading = status.loading && !status.data;
 
-  // Needs-config / unconfigured short-circuit. The preferred PLA-502 signal
+  // Needs-config / unconfigured short-circuit. The preferred signal
   // is `connection.state === "unconfigured"` (rendered inline by
   // ConnectionBanner). The full-replace fallback below covers the case
   // where the worker surfaces this through a `status.error` code instead.
@@ -119,7 +119,7 @@ export function Page(_props: PluginPageProps) {
     );
   }
 
-  // PLA-502/503: if the worker reported no configured base URL, render the
+  // If the worker reported no configured base URL, render the
   // needs-config placeholder. Treat "loading" as "not yet known"; only
   // branch once `configured` has resolved to a concrete `false`.
   if (configData.data && configData.data.configured === false) {
@@ -197,7 +197,7 @@ export function Page(_props: PluginPageProps) {
  * Sentinel: the worker surfaces "needs config" either as a structured
  * `connection.state === "unconfigured"` (preferred — caught in
  * ConnectionBanner) or as a `status` error whose code / message matches the
- * patterns below. PLA-502 will pin the wire shape; until then the message
+ * patterns below. The wire shape is not yet pinned; until it is, the message
  * match keeps the UI responsive.
  */
 function isUnconfiguredError(error: { message?: string; code?: string } | null | undefined): boolean {
