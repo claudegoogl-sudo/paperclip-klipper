@@ -84,7 +84,20 @@ const manifest: PaperclipPluginManifestV1 = {
         format: "uri",
         description:
           "Moonraker base URL (e.g. https://printer.lan). All outbound HTTP " +
-          "and WebSocket traffic from this plugin is restricted to this host.",
+          "and WebSocket traffic from this plugin is restricted to this host. " +
+          "Rejected at worker setup (fail closed) if it does not parse as " +
+          "http(s) or its host is not in moonrakerAllowedHosts.",
+      },
+      moonrakerAllowedHosts: {
+        type: "array",
+        items: { type: "string" },
+        minItems: 1,
+        description:
+          "Optional host allowlist for moonrakerBaseUrl. Defaults to the " +
+          "single host parsed out of moonrakerBaseUrl itself, so most " +
+          "operators never need to set this. Set explicitly to pin the " +
+          "plugin to a specific host regardless of what moonrakerBaseUrl " +
+          "later resolves to.",
       },
       moonrakerApiKeyRef: {
         type: "string",

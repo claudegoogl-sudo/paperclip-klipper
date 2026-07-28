@@ -10,6 +10,8 @@ on:
     paths:
       - 'src/manifest.ts'
       - 'src/globals.d.ts'
+      - 'src/worker.ts'
+      - 'src/worker/**'
       - 'package.json'
       - 'pnpm-lock.yaml'
       - 'esbuild.config.mjs'
@@ -18,6 +20,7 @@ on:
       - 'scripts/check-manifest-version.mjs'
       - 'tests/validate-manifest.spec.ts'
       - 'tests/no-published-sourcemaps.spec.ts'
+      - 'tests/validate-moonraker-base-url.spec.ts'
       - '.github/workflows/manifest-validate.yml'
   push:
     branches:
@@ -25,6 +28,8 @@ on:
     paths:
       - 'src/manifest.ts'
       - 'src/globals.d.ts'
+      - 'src/worker.ts'
+      - 'src/worker/**'
       - 'package.json'
       - 'pnpm-lock.yaml'
       - 'esbuild.config.mjs'
@@ -33,6 +38,7 @@ on:
       - 'scripts/check-manifest-version.mjs'
       - 'tests/validate-manifest.spec.ts'
       - 'tests/no-published-sourcemaps.spec.ts'
+      - 'tests/validate-moonraker-base-url.spec.ts'
       - '.github/workflows/manifest-validate.yml'
 
 jobs:
@@ -57,6 +63,8 @@ jobs:
         run: pnpm run build
       - name: Run regression test (PLA-376)
         run: pnpm exec vitest run --config ./vitest.config.ts tests/validate-manifest.spec.ts
+      - name: Run moonrakerBaseUrl host-validation regression test
+        run: pnpm exec vitest run --config ./vitest.config.ts tests/validate-moonraker-base-url.spec.ts
       - name: Validate built manifest
         run: pnpm run validate:manifest
       - name: Check manifest.version == package.json.version (PLA-526)

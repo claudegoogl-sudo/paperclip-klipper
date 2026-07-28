@@ -10,6 +10,7 @@ import {
   registerRpcSurface,
   type KlipperConfig,
 } from "./worker/registerRpcSurface.js";
+import { validateMoonrakerBaseUrl } from "./worker/validateMoonrakerBaseUrl.js";
 
 /**
  * paperclip-klipper worker.
@@ -79,8 +80,8 @@ export async function createKlipperWorker(
 ): Promise<KlipperWorker> {
   const rawConfig = await ctx.config.get();
   const config = rawConfig as Partial<KlipperConfig>;
-  const baseUrl = config.moonrakerBaseUrl;
-  if (!baseUrl) {
+  const rawBaseUrl = config.moonrakerBaseUrl;
+  if (!rawBaseUrl) {
     // Permissive init (PLA-502/503): worker initializes without
     // `moonrakerBaseUrl` so the host sees a healthy worker, `plugin install`
     // exits 0, and the page slot mounts. Tool / action / data handlers gate
@@ -93,6 +94,24 @@ export async function createKlipperWorker(
     registerRpcSurface(ctx, { config: config as KlipperConfig, client: null });
     return { client: null, config: config as KlipperConfig };
   }
+
+  // Validate BEFORE the resolved `moonrakerApiKeyRef` credential ever
+  // reaches a client wired to this value: WHATWG URL parse, reject
+  // non-http(s) schemes, and enforce the (by default self-derived) host
+  // allowlist. A value that fails validation must not crash worker setup —
+  // fall back to the same permissive-init branch as a missing config, and
+  // warn with the rejected *host* only (never the full value, never any
+  // credential).
+  const validated = validateMoonrakerBaseUrl(rawBaseUrl, config.moonrakerAllowedHosts);
+  if (!validated.ok) {
+    ctx.logger.warn(
+      "paperclip-klipper rejected moonrakerBaseUrl — refusing to start the Moonraker client until this is fixed; tool calls will return prerequisite_missing",
+      { pluginId: "platform.klipper", reason: validated.reason, host: validated.host },
+    );
+    registerRpcSurface(ctx, { config: config as KlipperConfig, client: null });
+    return { client: null, config: config as KlipperConfig };
+  }
+  const baseUrl = validated.url.toString();
 
   ctx.logger.info("paperclip-klipper worker setup", {
     moonrakerBaseUrl: baseUrl,
