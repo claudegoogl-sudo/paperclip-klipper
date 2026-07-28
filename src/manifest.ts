@@ -150,7 +150,7 @@ const manifest: PaperclipPluginManifestV1 = {
             format: "uuid",
             description:
               "Paperclip attachment UUID to upload. Resolved server-side via " +
-              "the dispatching agent's identity (PLA-574); the plugin worker " +
+              "the dispatching agent's identity; the plugin worker " +
               "never sees the bytes inline.",
           },
           path: {

@@ -10,6 +10,21 @@ import { afterAll, describe, expect, it } from "vitest";
 // who downloads a release asset. The build keeps maps on disk for local
 // debugging; this asserts they never reach the tarball.
 
+// Internal tracker ids and real vault namespaces reach the bundle through
+// ordinary source comments and manifest strings. The build strips comments
+// via esbuild `minifyWhitespace`; this asserts the result, scoped to the
+// bundled output under dist/.
+//
+// The needles are built from split literals so this spec's own prose cannot
+// trip the check if it is ever packaged, and are declared non-global so
+// `.test()` cannot carry `lastIndex` state between files and silently skip
+// every other one.
+const TICKET_ID_RE = new RegExp("\\bPLA" + "-\\d{1,5}\\b");
+const VAULT_NS_PLACEHOLDERS = ["EXAMPLE", "OTHER", "\\.\\.\\."];
+const VAULT_NS_RE = new RegExp(
+  "vault" + `://(?!(?:${VAULT_NS_PLACEHOLDERS.join("|")})(?![\\w-]))[\\w-]+`,
+);
+
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const DIST = join(REPO_ROOT, "dist");
 const tempDirs: string[] = [];
@@ -27,6 +42,19 @@ function npmPack(args: string[]): string {
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
   });
+}
+
+// `npm pack` is the slow part of this suite, so pack once and share the
+// extracted tree across every assertion that needs to read packed files.
+let extracted: string | undefined;
+function packAndExtract(): string {
+  if (extracted) return extracted;
+  const dest = mkdtempSync(join(tmpdir(), "pack-"));
+  tempDirs.push(dest);
+  const tarball = npmPack(["--pack-destination", dest]).trim().split("\n").pop()!;
+  execFileSync("tar", ["-xzf", join(dest, tarball), "-C", dest]);
+  extracted = dest;
+  return dest;
 }
 
 afterAll(() => {
@@ -50,15 +78,22 @@ describe("published tarball", () => {
   });
 
   it("packs no file containing sourcesContent or a sourceMappingURL footer", () => {
-    const dest = mkdtempSync(join(tmpdir(), "pack-"));
-    tempDirs.push(dest);
-    const tarball = npmPack(["--pack-destination", dest]).trim().split("\n").pop()!;
-    execFileSync("tar", ["-xzf", join(dest, tarball), "-C", dest]);
-
+    const dest = packAndExtract();
     const offenders = walk(join(dest, "package")).filter((file) => {
       const text = readFileSync(file, "utf8");
       return text.includes("sourcesContent") || text.includes("sourceMappingURL=");
     });
+    expect(offenders.map((f) => f.slice(dest.length + 1))).toEqual([]);
+  });
+
+  it("packs no internal ticket ids or non-placeholder vault namespaces in dist/", () => {
+    const dest = packAndExtract();
+    const offenders = walk(join(dest, "package"))
+      .filter((file) => file.includes("/dist/"))
+      .filter((file) => {
+        const text = readFileSync(file, "utf8");
+        return TICKET_ID_RE.test(text) || VAULT_NS_RE.test(text);
+      });
     expect(offenders.map((f) => f.slice(dest.length + 1))).toEqual([]);
   });
 }, 180_000);
