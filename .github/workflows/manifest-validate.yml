@@ -8,39 +8,35 @@ name: Plugin manifest validation (release gate)
 on:
   pull_request:
     paths:
-      - 'src/manifest.ts'
-      - 'src/globals.d.ts'
-      - 'src/worker.ts'
-      - 'src/worker/**'
+      - 'src/**'
+      - 'tests/**'
       - 'package.json'
       - 'pnpm-lock.yaml'
+      - 'tsconfig.json'
+      - 'vitest.config.ts'
       - 'esbuild.config.mjs'
       - 'rollup.config.mjs'
       - 'scripts/validate-manifest.mjs'
       - 'scripts/check-manifest-version.mjs'
       - 'scripts/check-source-hygiene.mjs'
-      - 'tests/validate-manifest.spec.ts'
-      - 'tests/no-published-sourcemaps.spec.ts'
-      - 'tests/validate-moonraker-base-url.spec.ts'
+      - '.paperclip-sdk/**'
       - '.github/workflows/manifest-validate.yml'
   push:
     branches:
       - main
     paths:
-      - 'src/manifest.ts'
-      - 'src/globals.d.ts'
-      - 'src/worker.ts'
-      - 'src/worker/**'
+      - 'src/**'
+      - 'tests/**'
       - 'package.json'
       - 'pnpm-lock.yaml'
+      - 'tsconfig.json'
+      - 'vitest.config.ts'
       - 'esbuild.config.mjs'
       - 'rollup.config.mjs'
       - 'scripts/validate-manifest.mjs'
       - 'scripts/check-manifest-version.mjs'
       - 'scripts/check-source-hygiene.mjs'
-      - 'tests/validate-manifest.spec.ts'
-      - 'tests/no-published-sourcemaps.spec.ts'
-      - 'tests/validate-moonraker-base-url.spec.ts'
+      - '.paperclip-sdk/**'
       - '.github/workflows/manifest-validate.yml'
 
 jobs:
@@ -57,21 +53,23 @@ jobs:
           run_install: false
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
           cache: 'pnpm'
           cache-dependency-path: pnpm-lock.yaml
       - run: pnpm install --frozen-lockfile
       - name: Check source hygiene (no internal ticket ids / namespace strings)
         run: pnpm run check:source-hygiene
+      - name: Typecheck
+        run: pnpm run typecheck
       - name: Build manifest (and worker)
         run: pnpm run build
-      - name: Run regression test (PLA-376)
-        run: pnpm exec vitest run --config ./vitest.config.ts tests/validate-manifest.spec.ts
-      - name: Run moonrakerBaseUrl host-validation regression test
-        run: pnpm exec vitest run --config ./vitest.config.ts tests/validate-moonraker-base-url.spec.ts
+      - name: Unit tests (full suite)
+        run: pnpm exec vitest run --config ./vitest.config.ts
       - name: Validate built manifest
         run: pnpm run validate:manifest
-      - name: Check manifest.version == package.json.version (PLA-526)
+      - name: Check manifest.version == package.json.version
         run: pnpm run check:manifest-version
+      # Also covered by "Unit tests" above; named separately so the packaging
+      # gate stays legible in the checks list if the suite changes shape.
       - name: Assert the packed tarball ships no sourcemaps
         run: pnpm exec vitest run --config ./vitest.config.ts tests/no-published-sourcemaps.spec.ts
