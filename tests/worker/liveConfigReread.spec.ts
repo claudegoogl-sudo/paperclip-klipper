@@ -98,7 +98,7 @@ describe("config gates are re-read live on every dispatch (no setup-time caching
     harness.setConfig({ ...base, allow_agent_initiated_print: true });
 
     const after = await startPrint();
-    expect(after.error).toBe("scratch-branch CI-red demo: this assertion is deliberately wrong");
+    expect(after.error).toBeUndefined();
     expect(startCalls).toEqual(["demo.gcode"]);
   });
 
