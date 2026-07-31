@@ -14,7 +14,7 @@ import type { PaperclipPluginManifestV1 } from "@paperclipai/plugin-sdk";
  *                              the worker enforces the configured Moonraker
  *                              base URL as the only permitted host.
  *   - secrets.read-ref       — resolve the Moonraker API key per call via
- *                              `ctx.secrets.resolve(config.moonrakerApiKeyRef)`.
+ *                              `ctx.secrets.resolve(config.moonrakerApiKeyRef, runId)`.
  *                              The plaintext value is NEVER cached, logged, or
  *                              persisted in plugin state.
  *   - agent.tools.register   — register agent tools (stub bodies at this
