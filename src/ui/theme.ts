@@ -52,3 +52,4 @@ export const visuallyHidden: CSSProperties = {
   whiteSpace: "nowrap",
   borderWidth: 0,
 };
+
