@@ -131,6 +131,34 @@ export function uploadPathError(path: string): string | null {
   return null;
 }
 
+/**
+ * Re-read config from INSIDE a dispatch (executeTool) so the opt-in gate flags
+ * resolve the dispatching company's own config rather than whatever was pinned
+ * at setup() time — a single worker interleaving dispatches for two tenants
+ * must never authorize a high-blast-radius tool (upload_gcode / start_print)
+ * off a config value captured for the wrong company (or captured before any
+ * company was scoped at all). A use-time read failure is logged at `error` and
+ * returns `{}`, which makes the `=== true` gates fail CLOSED (deny) — the
+ * failure is a loud, denied signal, never a silently-swallowed permissive
+ * short-circuit. The physical MoonrakerClient/WS transport is a legitimate
+ * setup-time singleton and is intentionally not rebuilt per dispatch.
+ */
+async function readLiveConfig(
+  ctx: PluginContext,
+  method: string,
+): Promise<Partial<KlipperConfig>> {
+  try {
+    return ((await ctx.config.get()) ?? {}) as Partial<KlipperConfig>;
+  } catch (err) {
+    ctx.logger.error("klipper.config_read_failed", {
+      plugin: "platform.klipper",
+      method,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return {};
+  }
+}
+
 export function registerRpcSurface(
   ctx: PluginContext,
   options: RpcSurfaceOptions,
@@ -308,7 +336,10 @@ export function registerRpcSurface(
     },
     async (params, runCtx): Promise<ToolResult> => {
       if (!client) return prerequisiteMissingToolResult();
-      if (config.auto_upload_artifacts !== true) {
+      // Re-read config live on every dispatch — never gate off the value
+      // captured at setup(). Fails closed if the read errors.
+      const liveConfig = await readLiveConfig(ctx, "upload_gcode");
+      if (liveConfig.auto_upload_artifacts !== true) {
         return {
           error:
             `auto_upload_artifacts is false; the ${CONFIG_GATE_AUTO_UPLOAD} ` +
@@ -405,7 +436,10 @@ export function registerRpcSurface(
     },
     async (params): Promise<ToolResult> => {
       if (!client) return prerequisiteMissingToolResult();
-      if (config.allow_agent_initiated_print !== true) {
+      // Re-read config live on every dispatch — never gate off the value
+      // captured at setup(). Fails closed if the read errors.
+      const liveConfig = await readLiveConfig(ctx, "start_print");
+      if (liveConfig.allow_agent_initiated_print !== true) {
         return {
           error:
             `allow_agent_initiated_print is false; the ${CONFIG_GATE_AGENT_PRINT} ` +
