@@ -336,8 +336,8 @@ export function registerRpcSurface(
     },
     async (params, runCtx): Promise<ToolResult> => {
       if (!client) return prerequisiteMissingToolResult();
-      // PLA-1886: re-read config live on every dispatch — never gate off the
-      // value captured at setup(). Fails closed if the read errors.
+      // Re-read config live on every dispatch — never gate off the value
+      // captured at setup(). Fails closed if the read errors.
       const liveConfig = await readLiveConfig(ctx, "upload_gcode");
       if (liveConfig.auto_upload_artifacts !== true) {
         return {
@@ -436,8 +436,8 @@ export function registerRpcSurface(
     },
     async (params): Promise<ToolResult> => {
       if (!client) return prerequisiteMissingToolResult();
-      // PLA-1886: re-read config live on every dispatch — never gate off the
-      // value captured at setup(). Fails closed if the read errors.
+      // Re-read config live on every dispatch — never gate off the value
+      // captured at setup(). Fails closed if the read errors.
       const liveConfig = await readLiveConfig(ctx, "start_print");
       if (liveConfig.allow_agent_initiated_print !== true) {
         return {

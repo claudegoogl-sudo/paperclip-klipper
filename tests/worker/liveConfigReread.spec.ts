@@ -1,5 +1,5 @@
 /**
- * PLA-1886: the opt-in gate flags (`auto_upload_artifacts`,
+ * The opt-in gate flags (`auto_upload_artifacts`,
  * `allow_agent_initiated_print`) must be re-read from config on EVERY dispatch,
  * never captured once at setup(). A single worker process interleaves
  * dispatches for many tenant companies, so a config change (an admin toggling
@@ -82,7 +82,7 @@ function setupHarness(initialConfig: Record<string, unknown>) {
   return { harness, startCalls, uploadCalls, startPrint, uploadGcode };
 }
 
-describe("PLA-1886: config gates are re-read live on every dispatch (no setup-time caching)", () => {
+describe("config gates are re-read live on every dispatch (no setup-time caching)", () => {
   it("klipper.start_print picks up allow_agent_initiated_print enabled AFTER setup, on the next call", async () => {
     const base = { moonrakerBaseUrl: "http://printer.lan:7125" };
     const { harness, startCalls, startPrint } = setupHarness({
