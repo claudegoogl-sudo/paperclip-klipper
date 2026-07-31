@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 /**
- * PLA-502/503 — page slot renders a needs-config placeholder when the
+ * Page slot renders a needs-config placeholder when the
  * worker reports `configured: false`. Mirrors the CAD plugin pattern of
  * keeping the page mounted while config is missing.
  */
@@ -50,7 +50,7 @@ afterEach(() => {
   cleanup();
 });
 
-describe("Klipper page — needs-config placeholder (PLA-502/503)", () => {
+describe("Klipper page — needs-config placeholder", () => {
   it("renders the needs-config placeholder when configured=false", async () => {
     dataFn.mockImplementation((key: string) => {
       if (key === "config") {

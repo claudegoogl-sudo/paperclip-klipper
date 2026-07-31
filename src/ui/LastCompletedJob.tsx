@@ -1,6 +1,6 @@
 /**
  * Last-completed-job summary — section 5 of the Klipper page UI
- * (PLA-480 / §6.4 rev-4).
+ * (see §6.4 rev-4).
  *
  * Collapsible footer that surfaces `print_stats` when state is `complete`,
  * `cancelled`, or `error`. Hidden during `standby` / `printing` / `paused`

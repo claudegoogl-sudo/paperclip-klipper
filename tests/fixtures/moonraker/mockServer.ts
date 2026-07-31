@@ -1,8 +1,8 @@
 /**
- * In-process mock Moonraker server. Used by the PLA-475 MoonrakerClient tests
+ * In-process mock Moonraker server. Used by the MoonrakerClient tests
  * to exercise REST + WS without touching a real printer.
  *
- * Implements only the subset PLA-475 cares about:
+ * Implements only the subset those tests care about:
  *   - `GET /printer/info`
  *   - `GET /printer/objects/query`
  *   - `GET /server/files/list`

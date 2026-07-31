@@ -1,5 +1,5 @@
 /**
- * PLA-514 regression: `MoonrakerClient.uploadGcode` MUST send Moonraker a
+ * Regression: `MoonrakerClient.uploadGcode` MUST send Moonraker a
  * `Content-Type: multipart/form-data; boundary=…` header whose boundary token
  * literally appears as the delimiter in the request body. The previous
  * implementation passed a `FormData` to the plugin-sdk `PluginHttpClient`,
@@ -91,7 +91,7 @@ function lowerKey(headers: HeadersInit | undefined, key: string): string | undef
   return undefined;
 }
 
-describe("MoonrakerClient.uploadGcode — PLA-514 multipart Content-Type", () => {
+describe("MoonrakerClient.uploadGcode — multipart Content-Type", () => {
   it("sends a multipart Content-Type header whose boundary literally appears in the body", async () => {
     const { http, calls } = makeRecordingHttp();
     const client = new MoonrakerClient({
@@ -101,7 +101,7 @@ describe("MoonrakerClient.uploadGcode — PLA-514 multipart Content-Type", () =>
       logger: makeNoopLogger(),
     });
 
-    // Acceptance fixture from PLA-514: payload bytes "G1".
+    // Acceptance fixture: payload bytes "G1".
     await client.uploadGcode("x.gcode", new Uint8Array([0x47, 0x31]));
 
     expect(calls).toHaveLength(1);
@@ -135,7 +135,7 @@ describe("MoonrakerClient.uploadGcode — PLA-514 multipart Content-Type", () =>
 });
 
 /**
- * PLA-612 worker-side gunzip. Real prints (>10 MB raw) only fit the
+ * Worker-side gunzip. Real prints (>10 MB raw) only fit the
  * issue-attachment store when gzipped, but Moonraker needs plain g-code. The
  * `klipper.upload_gcode` handler must transparently inflate gzip-magic
  * artifacts before upload, leave plain artifacts byte-for-byte untouched, and
@@ -219,7 +219,7 @@ function setupGunzipHarness(opts: {
   return { harness, captured, exec };
 }
 
-describe("klipper.upload_gcode — PLA-612 worker-side gunzip", () => {
+describe("klipper.upload_gcode — worker-side gunzip", () => {
   it("gunzips a gzip-magic artifact so plain g-code reaches client.uploadGcode", async () => {
     const plain = new TextEncoder().encode(
       "G28\nG1 X10 Y10 F3000\nG1 Z0.2 F600\nM104 S210\n",
@@ -288,7 +288,7 @@ describe("klipper.upload_gcode — PLA-612 worker-side gunzip", () => {
 });
 
 /**
- * PLA-615 virtual_sdcard path-traversal hardening (defense-in-depth, OWASP
+ * virtual_sdcard path-traversal hardening (defense-in-depth, OWASP
  * A01). The optional `path` subdirectory is forwarded verbatim into Moonraker's
  * multipart upload `path` form field, so the worker must reject — never
  * sanitize — any traversal-y value (`..`, leading `/`, backslash, NUL) BEFORE
@@ -300,7 +300,7 @@ describe("klipper.upload_gcode — PLA-612 worker-side gunzip", () => {
  * non-gzip artifact so a clean call reaches the client) and assert nothing was
  * uploaded on rejection.
  */
-describe("klipper.upload_gcode — PLA-615 virtual_sdcard path traversal hardening", () => {
+describe("klipper.upload_gcode — virtual_sdcard path traversal hardening", () => {
   const PLAIN = new TextEncoder().encode("G28\nG1 X1 Y1\nM104 S0\n");
 
   it.each([

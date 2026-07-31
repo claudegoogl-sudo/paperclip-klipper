@@ -9,7 +9,7 @@ import {
   truncateFilename,
 } from "../../src/ui/format.js";
 
-describe("format helpers (PLA-480)", () => {
+describe("format helpers", () => {
   describe("formatBytes", () => {
     it("returns em-dash for null/negative/invalid", () => {
       expect(formatBytes(null)).toBe("—");

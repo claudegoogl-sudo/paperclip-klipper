@@ -3,7 +3,7 @@ import type { PaperclipPluginManifestV1 } from "@paperclipai/plugin-sdk";
 /**
  * Paperclip-klipper plugin manifest.
  *
- * Scaffold from PLA-474 (Phase 1.1 / Workstream 6.2). The manifest declares
+ * Initial scaffold (Phase 1.1 / Workstream 6.2). The manifest declares
  * **only** the capabilities required by the spec; any expansion is a separate
  * governance ticket per the plan brief.
  *
@@ -22,10 +22,10 @@ import type { PaperclipPluginManifestV1 } from "@paperclipai/plugin-sdk";
  *   - events.subscribe       — subscribe to host events the worker will react
  *                              to in 6.5. Stub handlers only at this phase.
  *   - ui.page.register        — host-mounted `page` slot at
- *                              `/:companyPrefix/printer`. PLA-473 Q1 resolved
- *                              the nav-surface spike to Option 2 (page slot)
- *                              and PLA-480 / §6.4 lands the real four-section
- *                              UI behind it. The capability count stays at
+ *                              `/:companyPrefix/printer`. The nav-surface
+ *                              spike resolved to Option 2 (page slot) and
+ *                              §6.4 lands the real four-section UI behind
+ *                              it. The capability count stays at
  *                              five — `ui.dashboardWidget.register` was
  *                              swapped out for `ui.page.register`; no net
  *                              expansion (governance ticket is still required
@@ -33,7 +33,7 @@ import type { PaperclipPluginManifestV1 } from "@paperclipai/plugin-sdk";
  */
 // `__PLUGIN_VERSION__` is substituted at build time from
 // `package.json.version` by esbuild's `define` (see `esbuild.config.mjs`).
-// PLA-526 made `package.json.version` the single source of truth so the
+// Using `package.json.version` as the single source of truth means the
 // installed plugin's reported version cannot drift from the package version.
 const manifest: PaperclipPluginManifestV1 = {
   id: "platform.klipper",
@@ -75,7 +75,7 @@ const manifest: PaperclipPluginManifestV1 = {
   //     callable by agents without per-call human confirmation. Default
   //     off — gates a high-blast-radius action behind explicit opt-in.
   // `additionalProperties: false` makes unknown config keys fail-closed at
-  // host load time (mirrors paperclip-plugin-cad's PLA-74 F3 fix).
+  // host load time (mirrors a fix applied in paperclip-plugin-cad).
   instanceConfigSchema: {
     type: "object",
     properties: {
@@ -127,7 +127,7 @@ const manifest: PaperclipPluginManifestV1 = {
   },
 
   // Agent tools — stubs only at this phase. Real implementations land in
-  // PLA-475 (worker) and 6.5 (tool surface). The names and parameter
+  // a later phase (worker) and 6.5 (tool surface). The names and parameter
   // schemas are sketched here so the manifest declaration is stable; the
   // 6.5 ticket may refine schemas before the first usable release.
   tools: [
@@ -163,12 +163,12 @@ const manifest: PaperclipPluginManifestV1 = {
             format: "uuid",
             description:
               "Paperclip attachment UUID to upload. Resolved server-side via " +
-              "the dispatching agent's identity (PLA-574); the plugin worker " +
+              "the dispatching agent's identity; the plugin worker " +
               "never sees the bytes inline.",
           },
           path: {
             type: "string",
-            // PLA-615: allowlist a relative virtual_sdcard subdirectory — 1-4
+            // Allowlist a relative virtual_sdcard subdirectory — 1-4
             // '/'-separated segments of [A-Za-z0-9._-], each starting
             // alphanumeric. Structurally rejects a leading '/', '..'/'.'
             // segments, backslashes and NUL so a caller cannot traverse out of
@@ -206,10 +206,10 @@ const manifest: PaperclipPluginManifestV1 = {
     },
   ],
 
-  // UI slots — PLA-473 Q1 resolved to Option 2 (a host-mounted `page` slot
+  // UI slots — resolved to Option 2 (a host-mounted `page` slot
   // at `/:companyPrefix/printer`). The four-section UI (connection banner,
   // recent uploads, file detail, active print) is implemented behind the
-  // `Page` export in `src/ui/index.tsx` per PLA-480 / §6.4.
+  // `Page` export in `src/ui/index.tsx` (see §6.4).
   //
   // routePath is the company-scoped segment — the host resolves it to
   // `/:companyPrefix/printer` (e.g. `/PLA/printer`).

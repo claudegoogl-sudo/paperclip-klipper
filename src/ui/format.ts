@@ -1,5 +1,5 @@
 /**
- * Pure-formatting helpers for the Klipper page UI (PLA-480 / §6.4).
+ * Pure-formatting helpers for the Klipper page UI (see §6.4).
  *
  * Kept side-effect-free and free of React/DOM imports so they can be unit
  * tested under the default `node` vitest environment without dragging in

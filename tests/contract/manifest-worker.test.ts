@@ -1,17 +1,16 @@
 /**
- * Manifest ↔ worker contract test (PLA-510).
+ * Manifest ↔ worker contract test.
  *
- * PLA-509 DPR found that the worker was registering bare tool names while
- * the host dispatches by the namespaced manifest name, so every
+ * A previous regression found that the worker was registering bare tool
+ * names while the host dispatches by the namespaced manifest name, so every
  * `/api/plugins/tools/execute` call against `klipper.*` returned a 500
  * dispatch error. The host does NOT auto-namespace — registered names
- * MUST equal `manifest.tools[].name` verbatim. PLA-509 also surfaced
- * schema drift between manifest and worker (v0.1.0 manifest declared
- * `{filename, artifactId}` while the worker accepted
+ * MUST equal `manifest.tools[].name` verbatim. That regression also
+ * surfaced schema drift between manifest and worker (v0.1.0 manifest
+ * declared `{filename, artifactId}` while the worker accepted
  * `{filename, gcodeBase64, path}`); v0.1.1 aligned both to
- * `{filename, gcodeBase64, path?}` as a hotfix, and PLA-576 / v0.1.6 lands
- * the original artifactId contract once PLA-574 shipped
- * `runCtx.artifacts.fetch`.
+ * `{filename, gcodeBase64, path?}` as a hotfix, and a later release lands
+ * the original artifactId contract once `runCtx.artifacts.fetch` shipped.
  *
  * This test boots `registerRpcSurface(stubCtx, …)` against a stub
  * PluginContext that records every `ctx.tools.register(name, schema, …)`
@@ -21,8 +20,8 @@
  *  - for each tool, the registered `parametersSchema` deep-equals the
  *    manifest's `parametersSchema`
  *
- * Either drift (name set or schema) makes this test fail, which is how
- * PLA-509 will catch the next regression before it ships.
+ * Either drift (name set or schema) makes this test fail, catching the next
+ * regression before it ships.
  */
 import { describe, expect, it } from "vitest";
 import type {
@@ -70,7 +69,7 @@ function buildStubClient(): unknown {
   return { __stub: true };
 }
 
-describe("manifest ↔ worker tool contract (PLA-510)", () => {
+describe("manifest ↔ worker tool contract", () => {
   const config: KlipperConfig = {
     moonrakerBaseUrl: "http://printer.invalid:7125",
   };

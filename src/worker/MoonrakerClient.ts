@@ -1,9 +1,9 @@
 /**
  * MoonrakerClient — REST + WebSocket transport for Moonraker (Klipper API
- * server). PLA-475 / Workstream 6.3.
+ * server). Workstream 6.3.
  *
  * Owns:
- *   - All REST calls listed in PLA-475 (upload, metadata, list, print start/
+ *   - All REST calls (upload, metadata, list, print start/
  *     pause/cancel, delete, printer info, object queries).
  *   - A persistent WebSocket to /websocket that subscribes to the printer
  *     objects the dashboard widget renders (print_stats, extruder, heater_bed,
@@ -354,7 +354,7 @@ export class MoonrakerClient {
   /**
    * POST /server/files/upload — multipart with `file` field.
    *
-   * PLA-514: the plugin-sdk RPC channel does NOT preserve native fetch
+   * The plugin-sdk RPC channel does NOT preserve native fetch
    * behavior for `FormData` bodies. `worker-rpc-host` serializes any
    * non-string body via `String(body)` (yielding `"[object FormData]"`),
    * which destroys the multipart envelope and drops the auto-synthesized

@@ -1,5 +1,5 @@
 /**
- * PLA-376 — regression coverage for the release-time manifest gate.
+ * Regression coverage for the release-time manifest gate.
  * Proves the gate catches the v0.1.1 incident shape (a tool name
  * containing ':') and accepts the dot/hyphen/underscore lowercase forms
  * the host validator allows.
@@ -14,7 +14,7 @@ function fixture(toolName: string) {
     apiVersion: 1 as const,
     version: "0.1.0",
     displayName: "Klipper",
-    description: "fixture for PLA-376 regression coverage",
+    description: "fixture for manifest-gate regression coverage",
     author: "Platform",
     categories: ["connector"] as const,
     capabilities: ["agent.tools.register"] as const,
@@ -30,7 +30,7 @@ function fixture(toolName: string) {
   };
 }
 
-describe("validate-manifest gate (PLA-376)", () => {
+describe("validate-manifest gate", () => {
   it("rejects a manifest with a colon in tools[].name (the v0.1.1 incident)", () => {
     const result = validateManifest(fixture("bad:name"));
     expect(result.ok).toBe(false);

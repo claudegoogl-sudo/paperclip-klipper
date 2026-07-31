@@ -18,6 +18,7 @@ on:
       - 'rollup.config.mjs'
       - 'scripts/validate-manifest.mjs'
       - 'scripts/check-manifest-version.mjs'
+      - 'scripts/check-source-hygiene.mjs'
       - 'tests/validate-manifest.spec.ts'
       - 'tests/no-published-sourcemaps.spec.ts'
       - 'tests/validate-moonraker-base-url.spec.ts'
@@ -36,6 +37,7 @@ on:
       - 'rollup.config.mjs'
       - 'scripts/validate-manifest.mjs'
       - 'scripts/check-manifest-version.mjs'
+      - 'scripts/check-source-hygiene.mjs'
       - 'tests/validate-manifest.spec.ts'
       - 'tests/no-published-sourcemaps.spec.ts'
       - 'tests/validate-moonraker-base-url.spec.ts'
@@ -59,6 +61,8 @@ jobs:
           cache: 'pnpm'
           cache-dependency-path: pnpm-lock.yaml
       - run: pnpm install --frozen-lockfile
+      - name: Check source hygiene (no internal ticket ids / namespace strings)
+        run: pnpm run check:source-hygiene
       - name: Build manifest (and worker)
         run: pnpm run build
       - name: Run regression test (PLA-376)

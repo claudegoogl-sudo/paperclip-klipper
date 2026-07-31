@@ -1,5 +1,5 @@
 /**
- * Module-local design helpers for the Klipper page UI (PLA-480 / §6.4).
+ * Module-local design helpers for the Klipper page UI (see §6.4).
  *
  * The host CSS-modules toolchain isn't wired through esbuild for plugin
  * bundles, so per the UX spec we keep all spacing/sizing/typography

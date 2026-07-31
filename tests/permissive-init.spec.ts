@@ -4,7 +4,7 @@ import manifest from "../src/manifest.js";
 import { createKlipperWorker } from "../src/worker.js";
 
 /**
- * PLA-502/503 — permissive worker init.
+ * Permissive worker init.
  *
  * When the worker starts without `moonrakerBaseUrl` in config, setup must:
  *   - resolve (not throw) so `plugin install` exits 0 and the host marks
@@ -25,7 +25,7 @@ const CAPABILITIES = [
   "events.emit",
 ] as const;
 
-describe("paperclip-klipper permissive init (PLA-502/503)", () => {
+describe("paperclip-klipper permissive init", () => {
   it("createKlipperWorker resolves without throwing when moonrakerBaseUrl is absent", async () => {
     const harness = createTestHarness({
       manifest,

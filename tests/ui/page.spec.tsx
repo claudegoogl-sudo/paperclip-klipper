@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 /**
- * UI interaction tests for the Klipper page (PLA-480 / §6.4 rev-4).
+ * UI interaction tests for the Klipper page (see §6.4 rev-4).
  *
  * Covers all five sections per AC §5 (rev-4):
  *   §1 ConnectionBanner — connected / connecting / reconnecting / failed / unconfigured
@@ -9,7 +9,7 @@
  *   §4 UploadAffordance — idle / selected / validation-error / uploading / success / failure
  *   §5 LastCompletedJob — hidden during printing; visible + collapsible after
  *
- * Data shapes feed in from the PLA-475 MockMoonraker fixture (where the
+ * Data shapes feed in from the MockMoonraker fixture (where the
  * worker contract matters); SDK hooks are mocked so the component tree
  * never touches the bridge transport (host runtime, not present in vitest).
  */
@@ -117,7 +117,7 @@ afterEach(() => {
 });
 
 // ── Page orchestrator ────────────────────────────────────────────────────
-describe("Page orchestrator (PLA-480 §6.4 rev-4)", () => {
+describe("Page orchestrator (§6.4 rev-4)", () => {
   it("renders all five sections wired to the right RPC keys", async () => {
     const conn: ConnectionStateSnapshot = { state: "connected", attempts: 0 };
     const status: MoonrakerStatusSnapshot = {
@@ -262,10 +262,10 @@ describe("ConnectionBanner (§6.4 §1)", () => {
     expect(getAction("retry_connection")).toHaveBeenCalledTimes(1);
   });
 
-  it("renders an unconfigured 'set up your printer' inline branch (PLA-502 preferred surface)", async () => {
+  it("renders an unconfigured 'set up your printer' inline branch (preferred surface)", async () => {
     // The narrow ConnectionStateSnapshot type doesn't include the future
-    // "unconfigured" variant yet (PLA-502 will widen it). Cast through
-    // `unknown` so this test pins the UI commitment we'll honour.
+    // "unconfigured" variant yet (a future change will widen it). Cast
+    // through `unknown` so this test pins the UI commitment we'll honour.
     await renderBanner({ state: "unconfigured", attempts: 0 } as unknown as ConnectionStateSnapshot);
     expect(screen.getByTestId("klipper-banner-unconfigured")).toBeTruthy();
     expect(screen.getByText(/Set up your Klipper printer/i)).toBeTruthy();
