@@ -16,6 +16,7 @@
     "validate:manifest": "node ./scripts/validate-manifest.mjs",
     "check:manifest-version": "node ./scripts/check-manifest-version.mjs",
     "check:source-hygiene": "node ./scripts/check-source-hygiene.mjs",
+    "check:drift": "node ./scripts/check-live-drift.mjs",
     "prepack": "npm run build && npm run validate:manifest"
   },
   "paperclipPlugin": {
@@ -26,6 +27,8 @@
   "files": [
     "dist/",
     "!dist/**/*.map",
+    "src/",
+    "scripts/check-live-drift.mjs",
     "README.md",
     "CHANGELOG.md"
   ],
