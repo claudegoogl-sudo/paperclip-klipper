@@ -292,7 +292,10 @@ describe("compareInstall", () => {
     const live = { ...CLEAN_LIVE, sourceHash: "zzz", files: { "worker.ts": "2", "new.ts": "3" } };
     const findings = compareInstall({ live, ref: CLEAN_REF });
     const drift = findings.find((f: { code: string }) => f.code === "SOURCE_DRIFT");
-    expect(drift.severity).toBe("error");
+    // src/ drift is a hygiene warning, not a security error. The runtime
+    // bytes in dist/ are what the host actually executes; src/ bytes can
+    // drift for legitimate reasons. DIST_DRIFT is the security gate.
+    expect(drift.severity).toBe("warn");
     expect(drift.detail).toEqual({ added: ["new.ts"], removed: [], changed: ["worker.ts"] });
   });
 

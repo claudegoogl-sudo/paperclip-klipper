@@ -17,7 +17,8 @@
     "check:manifest-version": "node ./scripts/check-manifest-version.mjs",
     "check:source-hygiene": "node ./scripts/check-source-hygiene.mjs",
     "check:drift": "node ./scripts/check-live-drift.mjs",
-    "prepack": "npm run build && npm run validate:manifest"
+    "write:dist-hashes": "node ./scripts/write-dist-hashes.mjs",
+    "prepack": "npm run build && npm run write:dist-hashes && npm run validate:manifest"
   },
   "paperclipPlugin": {
     "manifest": "./dist/manifest.js",
@@ -27,8 +28,10 @@
   "files": [
     "dist/",
     "!dist/**/*.map",
+    "dist.sha256",
     "src/",
     "scripts/check-live-drift.mjs",
+    "scripts/write-dist-hashes.mjs",
     "README.md",
     "CHANGELOG.md"
   ],

@@ -248,8 +248,13 @@ export function compareInstall({ live, ref }) {
         `Install a release that includes src/ to enable source attestation.`,
     });
   } else if (live.sourceHash !== ref.sourceHash) {
+    // src/ drift is a hygiene warning, not a security error. The runtime
+    // bytes in dist/ are what the host actually executes; src/ bytes can
+    // drift for legitimate reasons (comment normalisation, file-set
+    // differences across package layouts). DIST_DRIFT below is the
+    // security gate.
     findings.push({
-      severity: "error",
+      severity: "warn",
       code: "SOURCE_DRIFT",
       message: `Running src/ does not match ${ref.name}.`,
       detail: diffFileHashes(ref.files, live.files),
@@ -401,7 +406,7 @@ function readLiveInstall(packageRoot, pid) {
 function readRefInstall(refName, isTag) {
   const dir = mkdtempSync(join(tmpdir(), "drift-ref-"));
   try {
-    const archive = spawnSync("git", ["archive", "--format=tar", refName, SOURCE_DIR, "package.json"], {
+    const archive = spawnSync("git", ["archive", "--format=tar", refName, SOURCE_DIR, "package.json", "dist.sha256"], {
       cwd: REPO_ROOT,
       encoding: "buffer",
       maxBuffer: 256 * 1024 * 1024,
