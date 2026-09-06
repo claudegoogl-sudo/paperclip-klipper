@@ -311,7 +311,7 @@ packages:
     resolution: {integrity: sha512-cYQ9310grqxueWbl+WuIUIaiUaDcj7WOq5fVhEljNVgRfOUhY9fy2zTvfoqWsnebh8Sl70VScFbICvJnLKB0Og==}
 
   '@paperclipai/plugin-sdk@file:.paperclip-sdk/paperclipai-plugin-sdk-2026.428.1-fork.9.tgz':
-    resolution: {integrity: sha512-7X00Xj6ILlTZWU13/LzUQXA7wbot9RGmrQ9vSlm4i7osZbgairnc7xKlW0J8irA4HZhuS/GSWJhAwgSQjxUAZA==, tarball: file:.paperclip-sdk/paperclipai-plugin-sdk-2026.428.1-fork.9.tgz}
+    resolution: {integrity: sha512-xTcrp74UJY/7q0/Y41YIyQ1Zf06sp3Js1fM742NoJHirK2MZlV9nci8QDroKghNnzCfOKaqKtobzUZqFhKS/jg==, tarball: file:.paperclip-sdk/paperclipai-plugin-sdk-2026.428.1-fork.9.tgz}
     version: 2026.428.1-fork.9
     hasBin: true
     peerDependencies:
@@ -321,7 +321,7 @@ packages:
         optional: true
 
   '@paperclipai/shared@file:.paperclip-sdk/paperclipai-shared-2026.428.1-fork.9.tgz':
-    resolution: {integrity: sha512-EdLEPC7pTLoze1xKiim+8GDJT1kR0np60TbwIYlTKPn3I5AoQVZItUnRUZHGeHu/nZge88EU5AsKiUk5uYCR8A==, tarball: file:.paperclip-sdk/paperclipai-shared-2026.428.1-fork.9.tgz}
+    resolution: {integrity: sha512-+drn/qy4ZJOtcAviGzQQdq95jAQKcu7pObAeag4A+YjzOW4MnzshZsEk+7DZyJmOBmiSwrTc5RaO+KXAjvyP1A==, tarball: file:.paperclip-sdk/paperclipai-shared-2026.428.1-fork.9.tgz}
     version: 2026.428.1-fork.9
 
   '@rollup/plugin-node-resolve@16.0.3':
