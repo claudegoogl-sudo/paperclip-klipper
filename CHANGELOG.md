@@ -5,6 +5,39 @@ plugin follows semver against the host plugin API (PLA-526 keeps
 `package.json.version` and the manifest version in lockstep via the build
 `define`).
 
+## 0.1.11 — 2026-09-16
+
+### Fixed
+- **Boot failure on hosts that deliver config via replay.** The host spawns
+  plugin workers with an empty bootstrap config and replays each configured
+  company's stored row through the `configChanged` RPC right after boot;
+  `ctx.config.get()` from `setup()` runs in service scope with no company
+  attached and is denied ("company context is required"). The worker
+  previously treated that denial as fatal: lifecycle went ready→error and no
+  worker process existed at all. The setup-time read is now best-effort — a
+  denial means config UNKNOWN, not failure: the worker boots permissive
+  (data/actions/tools registered; tools return `prerequisite_missing`) and
+  holds `ready` until config lands.
+- Added the `onConfigChanged` lifecycle hook (the authoritative config source
+  on replay-delivering hosts). The host replay — and every operator config
+  save — now applies in-process: it starts the Moonraker client without a
+  worker restart, breaking the previous restart→denied-boot→error loop.
+  Authorization is never bypassed: a denied read yields unknown config, and
+  the opt-in tool gates keep re-reading config per dispatch (fail-closed).
+- Replay application is idempotent by connection identity
+  (baseUrl + allowedHosts + apiKeyRef): the per-company replay burst at every
+  boot converges on one client instead of churning transports. A replay whose
+  connection identity changed stops the old client before building the new
+  one; a replay that is absent or fails `moonrakerBaseUrl` validation stops
+  any live client and degrades back to permissive init — the worker never
+  crashes on a bad config.
+- `onHealth` now reports `configKnown` and `clientActive` details so a
+  replay-pending boot is distinguishable from a configured connection in the
+  plugin health dashboard.
+- Event subscriptions (`issue.created`) are registered once per worker
+  lifetime rather than only on the configured path, so replay bursts cannot
+  stack duplicate handlers and an unconfigured worker still observes events.
+
 ## 0.1.8 — 2026-05-28 (PLA-615)
 
 ### Security
