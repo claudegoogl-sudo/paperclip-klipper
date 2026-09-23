@@ -5,6 +5,28 @@ plugin follows semver against the host plugin API (PLA-526 keeps
 `package.json.version` and the manifest version in lockstep via the build
 `define`).
 
+## 0.2.1 — 2026-09-23
+
+### Security (non-blocking findings from the FlashForge transport review)
+- **F1 — worker-side `filename` re-validation.** `uploadFilenameError()`
+  mirrors the `filename` schema pattern as a runtime backstop (the same
+  defense-in-depth `path` already had via `uploadPathError`) and is enforced
+  in the `upload_gcode` and `start_print` handlers BEFORE any artifact fetch
+  or client call — a bypassed host-side schema validation can no longer push
+  a quote, CR/LF, or NUL into the multipart `Content-Disposition` of either
+  transport.
+- **F2 — printer-controlled error text capped.** The FlashForge envelope
+  `message` is sliced to 1024 chars (matching the Moonraker error-body cap)
+  before it can reach a ToolResult error string, so a hostile or MITM'd
+  printer cannot stuff the agent context window.
+- **F3 — userinfo in `flashforgeBaseUrl` rejected.** URLs embedding
+  credentials (`http://user:pass@host`) fail closed at config validation
+  (`userinfo_not_allowed`) — basic-auth would otherwise ride every request
+  and leak into `flashforgeBaseUrl` log lines; the check code belongs in the
+  secret-ref.
+- Eight regression tests driving the handlers directly (bypassing schema
+  validation on purpose) — all red on 0.2.0, green with the fixes.
+
 ## 0.2.0 — 2026-09-23
 
 ### Added

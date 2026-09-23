@@ -140,6 +140,36 @@ const UPLOAD_PATH_PATTERN =
   /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}(\/[A-Za-z0-9][A-Za-z0-9._-]{0,63}){0,3}$/;
 
 /**
+ * Worker-side `filename` backstop — the runtime mirror of the `filename`
+ * schema `pattern` in src/manifest.ts and the worker registration. `filename`
+ * is interpolated raw into the hand-rolled multipart `Content-Disposition` of
+ * BOTH transports, so a missed or bypassed host-side schema validation must
+ * not be able to push a quote, CR/LF, or NUL onto the wire (the same
+ * defense-in-depth reasoning that produced `uploadPathError` for `path`).
+ *
+ * The explicit denylist branches run before the allowlist so the caller gets a
+ * precise reason for the injection-relevant characters.
+ */
+const UPLOAD_FILENAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}\.gcode$/;
+
+/**
+ * Return a human-readable reason the `filename` is unsafe, or `null` when it
+ * is an acceptable gcode filename.
+ */
+export function uploadFilenameError(filename: string): string | null {
+  if (filename.includes("\0")) return "contains a NUL byte";
+  if (filename.includes('"')) return "contains a double quote";
+  if (/\r|\n/.test(filename)) return "contains a CR/LF line break";
+  if (!UPLOAD_FILENAME_PATTERN.test(filename)) {
+    return (
+      "is not a safe gcode filename (allowed: 1-128 characters of " +
+      "[A-Za-z0-9._-], starting alphanumeric, ending in .gcode)"
+    );
+  }
+  return null;
+}
+
+/**
  * Return a human-readable reason the `path` is unsafe, or `null` when it is an
  * acceptable relative subdirectory. The explicit denylist branches run before
  * the allowlist so the caller gets a precise reason for the common bad cases.
@@ -401,6 +431,20 @@ export function registerRpcSurface(
           artifactId: string;
           path?: string;
         };
+        // Reject an unsafe filename before any artifact fetch or upload:
+        // `filename` is interpolated into the multipart Content-Disposition
+        // of both transports, so the worker re-checks the schema pattern
+        // (defense-in-depth — same reasoning as the `path` backstop below).
+        {
+          const reason = uploadFilenameError(filename);
+          if (reason !== null) {
+            ctx.logger.warn("klipper.upload_gcode.filename_rejected", {
+              filename,
+              reason,
+            });
+            return { error: `upload_gcode: refused — filename ${reason}.` };
+          }
+        }
         // Reject a traversal-y subdirectory before any artifact fetch
         // or upload. Defense-in-depth over the schema `pattern`; an empty path
         // means "no subdirectory" (matches MoonrakerClient's truthiness check)
@@ -497,6 +541,19 @@ export function registerRpcSurface(
       }
       try {
         const { filename } = params as { filename: string };
+        // Symmetric filename backstop: start_print forwards the filename to
+        // the printer API verbatim (query param / JSON body), so the same
+        // worker-side re-check applies before any client call.
+        {
+          const reason = uploadFilenameError(filename);
+          if (reason !== null) {
+            ctx.logger.warn("klipper.start_print.filename_rejected", {
+              filename,
+              reason,
+            });
+            return { error: `start_print: refused — filename ${reason}.` };
+          }
+        }
         const result = await client.startPrint(filename);
         return { data: { ok: true, result } };
       } catch (err) {
