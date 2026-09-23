@@ -22,6 +22,13 @@
  * schema against BOTH gates so the bind path cannot silently regress:
  * it replicates the host's validator setup and the schema walker, then runs
  * the exact config shapes operators submit.
+ *
+ * Replica currency: the host replica in this file (validator setup, schema
+ * walker, binding-parser expectations) was last verified line-by-line
+ * against host generation 2026.916.1-fork.48 on 2026-09-23. Re-verify
+ * walker/parser parity (host `collectFormatPaths` +
+ * `parseSecretRefBindingObject`) and refresh the replica whenever the
+ * installed host generation advances past fork.48, updating this note.
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 import AjvModule from "ajv";
