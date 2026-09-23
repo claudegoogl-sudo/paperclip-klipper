@@ -63,6 +63,7 @@ export type FlashForgeConfigValidation =
         | "missing_fields"
         | "unparseable"
         | "unsupported_scheme"
+        | "userinfo_not_allowed"
         | "host_not_allowed";
       fields: string[];
       host: string | null;
@@ -106,6 +107,17 @@ export function validateFlashForgeConfig(config: {
     return {
       ok: false,
       reason: "unsupported_scheme",
+      fields: ["flashforgeBaseUrl"],
+      host: url.host,
+    };
+  }
+  // Embedded userinfo (`http://user:pass@host`) would ride every request as
+  // basic auth AND appear verbatim in flashforgeBaseUrl log lines — reject it
+  // fail-closed. The check code belongs in a secret-ref, never in the URL.
+  if (url.username !== "" || url.password !== "") {
+    return {
+      ok: false,
+      reason: "userinfo_not_allowed",
       fields: ["flashforgeBaseUrl"],
       host: url.host,
     };
@@ -161,6 +173,12 @@ export function describeFlashForgeConfigFailure(
       return (
         `flashforgeBaseUrl must be http(s) — refusing to start the FlashForge ` +
         `transport (fail closed).`
+      );
+    case "userinfo_not_allowed":
+      return (
+        `flashforgeBaseUrl must not embed credentials (userinfo) — basic-auth ` +
+        `would ride every request and leak into logs; put the check code in ` +
+        `flashforgeCheckCodeRef instead (fail closed).`
       );
     case "host_not_allowed":
       return (

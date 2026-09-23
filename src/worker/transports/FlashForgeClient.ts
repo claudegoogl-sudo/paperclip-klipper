@@ -255,6 +255,14 @@ function envelopeOk(code: unknown): boolean {
 }
 
 /**
+ * Cap on printer-controlled envelope `message` text before it can reach an
+ * error string that flows into ToolResults (and thus agent context windows).
+ * Mirrors the Moonraker error-body cap in `toolError`. A hostile or MITM'd
+ * printer must not be able to stuff the consumer's context.
+ */
+const MAX_ENVELOPE_MESSAGE_CHARS = 1024;
+
+/**
  * FlashForgeClient. Construct once per worker; `start()` opens the poll
  * loop, `stop()` tears it down. REST methods may be called regardless of
  * poll state.
@@ -637,10 +645,13 @@ export class FlashForgeClient implements PrinterTransport {
   /** Assert the success envelope (HTTP-level status was already checked). */
   private assertEnvelope(data: { code?: unknown; message?: unknown }, path: string): void {
     if (!envelopeOk(data?.code)) {
+      // The envelope `message` is printer-controlled text — cap it before it
+      // becomes error output (context-stuffing guard, see MAX_ENVELOPE_MESSAGE_CHARS).
+      const message = String(data?.message ?? "no message").slice(0, MAX_ENVELOPE_MESSAGE_CHARS);
       throw new FlashForgeApiError(
         200,
         this.envelopeCodeOf(data),
-        `endpoint ${path} rejected the request (${String(data?.message ?? "no message")})`,
+        `endpoint ${path} rejected the request (${message})`,
       );
     }
   }

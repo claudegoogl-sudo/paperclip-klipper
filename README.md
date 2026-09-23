@@ -37,7 +37,7 @@ Config keys (all three required when the transport is selected):
 
 | Key | Kind | Notes |
 | --- | --- | --- |
-| `flashforgeBaseUrl` | URL | e.g. `http://192.168.1.50:8898`. Port `8898` is applied when omitted. All FlashForge traffic is scoped to this host (`flashforgeAllowedHosts` mirrors the moonraker allowlist). |
+| `flashforgeBaseUrl` | URL | e.g. `http://192.168.1.50:8898`. Port `8898` is applied when omitted; URLs embedding credentials (userinfo) are rejected — the check code belongs in the secret-ref. All FlashForge traffic is scoped to this host (`flashforgeAllowedHosts` mirrors the moonraker allowlist). |
 | `flashforgeSerialNumber` | string | The Device ID shown in the printer's *Network > LAN Only* settings. An identifier, not a credential. |
 | `flashforgeCheckCodeRef` | secret-ref | The per-printer check code (the LAN-mode credential). Resolved per call via `ctx.secrets.resolve`; never stored or logged. |
 

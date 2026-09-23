@@ -128,7 +128,8 @@ const manifest: PaperclipPluginManifestV1 = {
         format: "uri",
         description:
           "FlashForge printer base URL (e.g. http://192.168.1.50:8898). " +
-          "Port 8898 is applied when omitted. Required when transport is " +
+          "Port 8898 is applied when omitted; URLs embedding credentials " +
+          "(userinfo) are rejected. Required when transport is " +
           "\"flashforge\"; all FlashForge traffic is restricted to this host.",
       },
       flashforgeAllowedHosts: {
