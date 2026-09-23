@@ -200,6 +200,37 @@ describe("F2: printer-controlled envelope message is capped at 1024 chars", () =
     });
     expect((thrown as Error).message).toContain("check code incorrect");
   });
+
+  it("end-to-end: the ToolResult error a dispatching agent receives stays ~1.1 KB", async () => {
+    // The review criterion verbatim: a 100 KB envelope message must not
+    // survive into the ToolResult error string. Drive the REAL surface —
+    // a real FlashForgeClient (stubbed http) behind registerRpcSurface —
+    // so the cap is exercised across assertEnvelope → FlashForgeApiError
+    // → toolError, exactly the production path.
+    const client = makeClient("C".repeat(100 * 1024));
+    const registered: RegisteredTool[] = [];
+    registerRpcSurface(buildStubCtx(registered), {
+      config: {
+        moonrakerBaseUrl: "http://printer.lan:7125",
+        auto_upload_artifacts: true,
+        allow_agent_initiated_print: true,
+      } as KlipperConfig,
+      client: client as never,
+    });
+    const start = registered.find((t) => t.name === "klipper.start_print")!.handler;
+    const result = await start({ filename: "bracket.gcode" }, {} as ToolRunContext);
+    expect(result.error).toBeDefined();
+    // Exact composition: "start_print: " (13) + "FlashForge 200 (code 1): "
+    // (25) + "endpoint /printGcode rejected the request (" (43) + the
+    // 1024-char capped printer text + ")" (1) = 1106 — ~1.1 KB, never the
+    // 100 KB the printer sent. Bound at 1150 so a one-char prefix tweak
+    // does not break the invariant this test protects.
+    expect(result.error!.length).toBeLessThanOrEqual(1150);
+    expect(result.error!.length).toBeGreaterThan(50);
+    // The diagnostic identity survives the cap (endpoint + envelope code).
+    expect(result.error).toContain("printGcode");
+    expect((result as { data?: { envelopeCode?: number } }).data?.envelopeCode).toBe(1);
+  });
 });
 
 describe("F3: flashforgeBaseUrl userinfo is rejected fail-closed", () => {
