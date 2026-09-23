@@ -2,8 +2,9 @@
  * Unit coverage for the fail-closed flashforge config validator, focused on
  * the two accepted secret-ref shapes: the legacy non-empty string and the
  * object binding ref. The ref value itself is opaque to the transport — it
- * must flow through to the connection config untouched (normalized objects
- * only) so the host decides resolvability at request time.
+ * must flow through to the connection config in canonical form (strings
+ * trimmed, objects normalized) so the host decides resolvability at
+ * request time.
  */
 import { describe, expect, it } from "vitest";
 import {
@@ -39,6 +40,20 @@ describe("validateFlashForgeConfig — legacy string checkCodeRef", () => {
     if (result.ok) {
       expect(result.config.checkCodeRef).toBe("flashforge-check-code");
       expect(result.config.baseUrl).toBe("http://192.168.1.50:8898/");
+    }
+  });
+
+  it("trims a padded legacy string ref (trim parity with the pre-object-binding validator)", () => {
+    const result = validateFlashForgeConfig({
+      ...BASE,
+      flashforgeCheckCodeRef: "  flashforge-check-code\t",
+    });
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      // The trimmed value is what flows to ctx.secrets.resolve — a padded
+      // config must resolve, never fail at the printer with an untrimmed
+      // ref.
+      expect(result.config.checkCodeRef).toBe("flashforge-check-code");
     }
   });
 });

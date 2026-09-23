@@ -481,3 +481,82 @@ describe("worker — flashforge transport with object checkCodeRef (mock printer
     expect(flat.includes(OBJECT_REF_CHECK_CODE)).toBe(false);
   });
 });
+
+/**
+ * Legacy string ref, trim parity end to end: the pre-object-binding
+ * validator trimmed flashforgeCheckCodeRef before handing it to the
+ * secrets client; 0.2.2 briefly dropped that trim, which would have sent a
+ * padded config value to resolution verbatim and failed at the printer. A
+ * padded string must resolve (trimmed) exactly like a clean one.
+ */
+describe("worker — flashforge transport with padded string checkCodeRef (trim parity)", () => {
+  const PADDED_REF = "  padded-check-code-ref\t";
+  const TRIMMED_REF = PADDED_REF.trim();
+  const PADDED_RESOLVED_CODE = "resolved-padded-ref-check-code";
+  let mock: MockFlashForge;
+
+  beforeEach(async () => {
+    mock = new MockFlashForge({
+      serialNumber: SERIAL,
+      checkCode: PADDED_RESOLVED_CODE,
+      gcodeList: ["bracket.gcode"],
+    });
+    await mock.start();
+  });
+
+  afterEach(async () => {
+    await mock.stop();
+  });
+
+  it("upload resolves the TRIMMED string ref and authenticates against the printer", async () => {
+    const resolveCalls: unknown[] = [];
+    const harness = createTestHarness({
+      manifest,
+      capabilities: [...CAPABILITIES],
+      config: {
+        transport: "flashforge",
+        flashforgeBaseUrl: mock.baseUrl(),
+        flashforgeSerialNumber: SERIAL,
+        flashforgeCheckCodeRef: PADDED_REF,
+        auto_upload_artifacts: true,
+      },
+    });
+    const origResolve = harness.ctx.secrets.resolve.bind(harness.ctx.secrets);
+    harness.ctx.secrets.resolve = (async (ref: string) => {
+      resolveCalls.push(ref);
+      return PADDED_RESOLVED_CODE;
+    }) as typeof harness.ctx.secrets.resolve;
+    void origResolve;
+
+    await createKlipperWorker(harness.ctx, {
+      autoStart: false,
+      flashforgeClientOverrides: { pollIntervalMs: 60_000 },
+    });
+
+    const result = await harness.executeTool<{
+      data?: { item?: { path: string } };
+      error?: string;
+    }>(
+      "klipper.upload_gcode",
+      { filename: "bracket.gcode", artifactId: ARTIFACT_ID },
+      artifactCtx(),
+    );
+
+    expect(result.error).toBeUndefined();
+    expect(result.data?.item?.path).toBe("bracket.gcode");
+
+    // Trim parity: the padded config value reaches resolution trimmed, so
+    // the request authenticates instead of failing on an untrimmed ref.
+    expect(resolveCalls).toEqual([TRIMMED_REF]);
+    const uploadReq = mock.recordedRequests.find((r) => r.url === "/uploadGcode");
+    expect(uploadReq).toBeDefined();
+    const h = (name: string) => {
+      const raw = uploadReq!.headers[name];
+      return Array.isArray(raw) ? raw[0] : raw;
+    };
+    expect(h("checkcode")).toBe(PADDED_RESOLVED_CODE);
+
+    const flat = JSON.stringify(harness.logs);
+    expect(flat.includes(PADDED_RESOLVED_CODE)).toBe(false);
+  });
+});
