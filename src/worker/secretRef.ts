@@ -90,16 +90,25 @@ export function isConfiguredSecretRef(value: unknown): boolean {
 
 /**
  * Stable connection-identity for a ref, used by the config fingerprints.
- * Strings keep their raw value as the identity (unchanged legacy behavior),
- * objects canonicalize to `secret_ref:<secretId>:<version|latest>` so two
- * saves that only differ in object key order (or whitespace) are the SAME
- * connection, while a real change (different secret or pinned version) is
- * a different one. The two prefixes can never collide. Malformed objects —
- * which the host would refuse at resolve time — still get a stable,
- * value-derived identity so a replay burst cannot churn clients.
+ * Strings canonicalize under a `string:` prefix; objects canonicalize to
+ * `secret_ref:<secretId>:<version|latest>` so two saves that only differ in
+ * object key order (or whitespace) are the SAME connection, while a real
+ * change (different secret or pinned version) is a different one. The
+ * disjoint prefixes mean a legacy string can never collide with an object
+ * identity — without the prefix, a string that literally read
+ * "secret_ref:<uuid>:<ver>" would alias that object's canonical identity.
+ * Malformed objects — which the host would refuse at resolve time — still
+ * get a stable, value-derived identity under `secret_ref:malformed:` so a
+ * replay burst cannot churn clients.
+ *
+ * The `string:` prefix is an identity CHANGE for pre-existing string
+ * configs: the first fingerprint computed after this upgrade differs from
+ * the pre-upgrade one, so each legacy-string config sees exactly one
+ * client rebuild (reconnect + re-detect) at upgrade time and then
+ * stabilizes. Config values and resolve behavior are untouched.
  */
 export function canonicalSecretRefIdentity(ref: SecretRef): string {
-  if (typeof ref === "string") return ref;
+  if (typeof ref === "string") return `string:${ref}`;
   const parsed = parseSecretRefObject(ref);
   if (parsed) {
     return `secret_ref:${parsed.secretId}:${parsed.version ?? "latest"}`;

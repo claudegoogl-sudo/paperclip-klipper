@@ -7,8 +7,13 @@
  *     order) is the SAME connection identity — the live client is kept;
  *   - a real change (different secretId or pinned version) IS a new
  *     connection — the old client is replaced;
- *   - legacy string refs keep their raw value as the identity, so existing
- *     configs see no identity churn across the upgrade.
+ *   - legacy string refs are identity-prefixed (`string:<value>`), which
+ *     keeps string identities disjoint from object identities: a string
+ *     that literally reads like an object's canonical form still replaces
+ *     the client instead of aliasing it. Upgrade consequence: the first
+ *     fingerprint computed after this change differs from the pre-change
+ *     one, so each legacy-string config sees a ONE-TIME client rebuild
+ *     (reconnect + re-detect) and then stabilizes.
  */
 import { describe, expect, it } from "vitest";
 import { createTestHarness } from "@paperclipai/plugin-sdk/testing";
@@ -84,7 +89,7 @@ describe("worker fingerprints — moonraker apiKeyRef shapes", () => {
     expect(worker.client).not.toBe(second);
   });
 
-  it("legacy string refs keep their raw value as identity (no upgrade churn)", async () => {
+  it("identical legacy string replays converge on one client (stable `string:` identity)", async () => {
     const harness = makeHarness(BASE);
     const worker = await createKlipperWorker(harness.ctx, { autoStart: false });
 
@@ -92,6 +97,27 @@ describe("worker fingerprints — moonraker apiKeyRef shapes", () => {
     const first = worker.client!;
     await worker.applyConfig({ ...BASE, moonrakerApiKeyRef: "moonraker-key-name" }, "configChanged", false);
     expect(worker.client).toBe(first);
+  });
+
+  it("a string that literally equals an object's canonical identity is a NEW connection (no aliasing)", async () => {
+    const harness = makeHarness(BASE);
+    const worker = await createKlipperWorker(harness.ctx, { autoStart: false });
+
+    await worker.applyConfig(
+      { ...BASE, moonrakerApiKeyRef: { type: "secret_ref", secretId: UUID_A } },
+      "configChanged",
+      false,
+    );
+    const first = worker.client!;
+    // Without the `string:` prefix this lookalike would alias the object's
+    // identity above and (wrongly) keep the live client.
+    await worker.applyConfig(
+      { ...BASE, moonrakerApiKeyRef: `secret_ref:${UUID_A}:latest` },
+      "configChanged",
+      false,
+    );
+    expect(worker.client).not.toBe(first);
+    expect(worker.client).not.toBeNull();
   });
 
   it("string → object ref switch replaces the client (identity differs)", async () => {

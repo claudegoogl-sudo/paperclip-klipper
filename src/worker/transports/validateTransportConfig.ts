@@ -15,9 +15,10 @@
  *     host). The FlashForge default LAN port 8898 is applied when the URL
  *     omits one.
  *   - flashforgeCheckCodeRef accepts BOTH secret-ref shapes: the legacy
- *     non-empty string and the binding object
- *     { type: "secret_ref", secretId, version? }. The ref is passed to
- *     ctx.secrets.resolve exactly as configured — the host decides what it
+ *     non-empty string (trimmed, as the pre-object-binding validator did)
+ *     and the binding object { type: "secret_ref", secretId, version? }
+ *     (kept in its normalized form). The ref reaches ctx.secrets.resolve
+ *     in that canonical form — the host decides what it
  *     can resolve, and an unresolvable ref refuses the request path (fail
  *     closed). A malformed object ref is reported as a missing field, never
  *     silently coerced to string semantics.
@@ -104,10 +105,16 @@ export function validateFlashForgeConfig(config: {
   // { type: "secret_ref", secretId, version? } binding object. Anything else
   // (empty string, malformed object, wrong types) counts as missing so the
   // operator sees one clear fail-closed error instead of a runtime surprise.
+  // The string branch is TRIMMED — parity with the pre-object-binding
+  // validator, which trimmed before handing the ref to the secrets client.
+  // The object branch keeps its normalized handling (secretId trim +
+  // version collapse) unchanged.
   const checkCodeRef: SecretRef | null = isConfiguredSecretRef(
     config.flashforgeCheckCodeRef,
   )
-    ? normalizedSecretRef(config.flashforgeCheckCodeRef as SecretRef)
+    ? typeof config.flashforgeCheckCodeRef === "string"
+      ? (config.flashforgeCheckCodeRef as string).trim()
+      : normalizedSecretRef(config.flashforgeCheckCodeRef as SecretRef)
     : null;
   if (!baseUrlRaw) missing.push("flashforgeBaseUrl");
   if (!serialNumber) missing.push("flashforgeSerialNumber");

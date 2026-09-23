@@ -5,6 +5,35 @@ plugin follows semver against the host plugin API (PLA-526 keeps
 `package.json.version` and the manifest version in lockstep via the build
 `define`).
 
+## 0.2.3 — 2026-09-23
+
+### Fixed
+- **Trim parity for legacy string check-code refs.** The object-binding
+  release (0.2.2) stopped trimming whitespace around a legacy string
+  `flashforgeCheckCodeRef`, so a padded config value (e.g. pasted with
+  leading/trailing spaces) would have been handed to the host's secret
+  resolution untrimmed and failed to resolve. Transport config validation
+  trims the string branch again — a padded string resolves exactly as it
+  did before 0.2.2. The object branch keeps its normalized handling
+  (secretId trim + version collapse) unchanged.
+
+### Changed
+- **Disjoint secret-ref connection identities (config fingerprints).**
+  Legacy string refs previously kept their raw value as the connection
+  fingerprint identity, so a string that literally read
+  `secret_ref:<uuid>:<ver>` would collide with that object binding's
+  canonical identity and the two configs would alias one connection.
+  String identities now carry a `string:` prefix, making string and object
+  identities disjoint by construction. One-time consequence for existing
+  legacy-string configs: the first fingerprint computed by this version
+  differs from the pre-upgrade one, so each such config sees exactly one
+  client rebuild (reconnect + re-detect) at upgrade time and then
+  stabilizes. No config value is rewritten and resolve behavior is
+  unchanged.
+- The manifest-vs-host secret-ref contract test now records the host
+  generation its host-code replica was last verified against, so replica
+  refreshes are driven by host upgrades instead of memory.
+
 ## 0.2.2 — 2026-09-23
 
 ### Added
