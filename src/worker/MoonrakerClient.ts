@@ -259,6 +259,12 @@ interface JsonRpcNotification {
  * `stop()` to tear it down. REST methods may be called regardless of WS state.
  */
 export class MoonrakerClient {
+  /**
+   * Transport identity marker for the `PrinterTransport` seam (see
+   * ./transports/PrinterTransport.ts). Purely additive — no behavior.
+   */
+  readonly kind = "moonraker" as const;
+
   private readonly baseUrl: URL;
   private readonly wsUrl: URL;
   private readonly reconnect: Required<ReconnectOptions>;

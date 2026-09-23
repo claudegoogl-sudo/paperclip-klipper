@@ -16,12 +16,16 @@
 import { gunzipSync } from "node:zlib";
 import type { PluginContext, ToolResult } from "@paperclipai/plugin-sdk";
 import {
-  MoonrakerClient,
   MoonrakerHttpError,
   MoonrakerOutboundScopeError,
   type ConnectionStateSnapshot,
   type MoonrakerStatusSnapshot,
 } from "./MoonrakerClient.js";
+import {
+  FlashForgeApiError,
+  FlashForgeOutboundScopeError,
+} from "./transports/FlashForgeClient.js";
+import type { PrinterTransport } from "./transports/PrinterTransport.js";
 
 /**
  * Upper bound on the *decompressed* g-code we will hand to Moonraker. Real
@@ -35,6 +39,12 @@ import {
 const MAX_INFLATED_GCODE_BYTES = 64 * 1024 * 1024; // 64 MB
 
 export interface KlipperConfig {
+  /**
+   * Printer transport selection. Absent/undefined resolves to "moonraker"
+   * (the legacy behavior, byte-for-byte). Any other value is rejected at
+   * load by the worker (and by the manifest enum at the host layer).
+   */
+  transport?: "moonraker" | "flashforge";
   moonrakerBaseUrl: string;
   /**
    * Operator-configurable host allowlist for `moonrakerBaseUrl` (PLA safety
@@ -43,6 +53,18 @@ export interface KlipperConfig {
    */
   moonrakerAllowedHosts?: string[];
   moonrakerApiKeyRef?: string;
+  /**
+   * FlashForge transport (Creator 5 LAN-only HTTP API). All three keys are
+   * required together when `transport: "flashforge"`; validation is
+   * fail-closed (see ./transports/validateTransportConfig.ts).
+   */
+  flashforgeBaseUrl?: string;
+  /** Optional host allowlist, mirroring moonrakerAllowedHosts. */
+  flashforgeAllowedHosts?: string[];
+  /** Printer serial number — the LAN-mode Device ID (identifier, not secret). */
+  flashforgeSerialNumber?: string;
+  /** Secret reference for the per-printer check code credential. */
+  flashforgeCheckCodeRef?: string;
   auto_upload_artifacts?: boolean;
   allow_agent_initiated_print?: boolean;
 }
@@ -50,12 +72,13 @@ export interface KlipperConfig {
 export interface RpcSurfaceOptions {
   config: KlipperConfig;
   /**
-   * MoonrakerClient or `null` when the worker started without
-   * `moonrakerBaseUrl` configured. When `null`, every handler short-circuits
-   * with a `prerequisite_missing` result rather than dereferencing the
-   * client. See the permissive-init pattern (matches the CAD plugin).
+   * Printer transport (Moonraker or FlashForge), or `null` when the worker
+   * started without usable transport config. When `null`, every handler
+   * short-circuits with a `prerequisite_missing` result rather than
+   * dereferencing the client. See the permissive-init pattern (matches the
+   * CAD plugin).
    */
-  client: MoonrakerClient | null;
+  client: PrinterTransport | null;
   /** Emit a status snapshot to the UI stream channel used by `usePluginStream`. */
   emitStreamSnapshot?: (snapshot: MoonrakerStatusSnapshot) => void;
   /** Emit a connection-state event to the UI stream channel. */
@@ -75,19 +98,23 @@ const CONFIG_GATE_AGENT_PRINT = "allow_agent_initiated_print";
 const PREREQ_MISSING_MESSAGE =
   "moonrakerBaseUrl not configured — set config via the host plugin settings UI.";
 
+const FLASHFORGE_PREREQ_MISSING_MESSAGE =
+  "FlashForge transport not configured — set flashforgeBaseUrl, " +
+  "flashforgeSerialNumber and flashforgeCheckCodeRef via the host plugin settings UI.";
+
 /** Tool-shaped `prerequisite_missing` payload (matches the CAD plugin shape). */
-function prerequisiteMissingToolResult(): ToolResult {
+function prerequisiteMissingToolResult(message: string = PREREQ_MISSING_MESSAGE): ToolResult {
   return {
     data: {
       error: "prerequisite_missing",
-      message: PREREQ_MISSING_MESSAGE,
+      message,
     },
   };
 }
 
 /** Action-side prerequisite-missing — thrown so the host surfaces it as an error. */
-function prerequisiteMissingError(): Error {
-  const err = new Error(PREREQ_MISSING_MESSAGE);
+function prerequisiteMissingError(message: string = PREREQ_MISSING_MESSAGE): Error {
+  const err = new Error(message);
   (err as Error & { code?: string }).code = "prerequisite_missing";
   return err;
 }
@@ -164,7 +191,16 @@ export function registerRpcSurface(
   options: RpcSurfaceOptions,
 ): void {
   const { config, client } = options;
-  const configured = client !== null && Boolean(config.moonrakerBaseUrl);
+  const transportKind = config.transport === "flashforge" ? "flashforge" : "moonraker";
+  const configured =
+    client !== null &&
+    (transportKind === "moonraker"
+      ? Boolean(config.moonrakerBaseUrl)
+      : Boolean(config.flashforgeBaseUrl));
+  const prereqMessage =
+    transportKind === "flashforge"
+      ? FLASHFORGE_PREREQ_MISSING_MESSAGE
+      : PREREQ_MISSING_MESSAGE;
   const maxInflatedGcodeBytes =
     options.maxInflatedGcodeBytes ?? MAX_INFLATED_GCODE_BYTES;
 
@@ -173,10 +209,22 @@ export function registerRpcSurface(
   // when the worker came up without config). When the client is absent we
   // return safe defaults so the UI can render the needs-config placeholder.
   ctx.data.register("config", async () => {
-    return {
+    // Moonraker / unset transport: exactly the legacy two-field shape.
+    // FlashForge: same base fields plus the transport identity so the UI
+    // can name the configured printer host.
+    const base = {
       configured,
-      moonrakerBaseUrl: configured ? config.moonrakerBaseUrl : null,
+      moonrakerBaseUrl:
+        configured && transportKind === "moonraker" ? config.moonrakerBaseUrl : null,
     };
+    if (transportKind === "flashforge") {
+      return {
+        ...base,
+        transport: "flashforge" as const,
+        flashforgeBaseUrl: configured ? config.flashforgeBaseUrl ?? null : null,
+      };
+    }
+    return base;
   });
 
   // `usePluginData("status")` reads the cached snapshot. We do not block on
@@ -204,7 +252,7 @@ export function registerRpcSurface(
   });
 
   ctx.data.register("file_metadata", async (params: Record<string, unknown>) => {
-    if (!client) throw prerequisiteMissingError();
+    if (!client) throw prerequisiteMissingError(prereqMessage);
     const filename = typeof params.filename === "string" ? params.filename : "";
     if (!filename) throw new Error("file_metadata requires `filename`");
     return client.getFileMetadata(filename);
@@ -216,25 +264,25 @@ export function registerRpcSurface(
   // missing they throw `prerequisite_missing` so the host surfaces a
   // structured error to the caller.
   ctx.actions.register("refresh", async () => {
-    if (!client) throw prerequisiteMissingError();
+    if (!client) throw prerequisiteMissingError(prereqMessage);
     const info = await client.getPrinterInfo();
     return { ok: true, info, snapshot: client.getStatusSnapshot() };
   });
 
   ctx.actions.register("pause_print", async () => {
-    if (!client) throw prerequisiteMissingError();
+    if (!client) throw prerequisiteMissingError(prereqMessage);
     const result = await client.pausePrint();
     return { ok: true, result };
   });
 
   ctx.actions.register("resume_print", async () => {
-    if (!client) throw prerequisiteMissingError();
+    if (!client) throw prerequisiteMissingError(prereqMessage);
     const result = await client.resumePrint();
     return { ok: true, result };
   });
 
   ctx.actions.register("cancel_print", async () => {
-    if (!client) throw prerequisiteMissingError();
+    if (!client) throw prerequisiteMissingError(prereqMessage);
     const result = await client.cancelPrint();
     return { ok: true, result };
   });
@@ -243,7 +291,7 @@ export function registerRpcSurface(
   // `allow_agent_initiated_print` — that flag covers agent tools; a user
   // tapping the Start button in the UI is its own consent signal.
   ctx.actions.register("start_print", async (params: Record<string, unknown>) => {
-    if (!client) throw prerequisiteMissingError();
+    if (!client) throw prerequisiteMissingError(prereqMessage);
     const filename = typeof params.filename === "string" ? params.filename : "";
     if (!filename) throw new Error("start_print requires `filename`");
     const result = await client.startPrint(filename);
@@ -251,7 +299,7 @@ export function registerRpcSurface(
   });
 
   ctx.actions.register("delete_file", async (params: Record<string, unknown>) => {
-    if (!client) throw prerequisiteMissingError();
+    if (!client) throw prerequisiteMissingError(prereqMessage);
     const path = typeof params.path === "string" ? params.path : "";
     if (!path) throw new Error("delete_file requires `path`");
     const root = typeof params.root === "string" ? params.root : "gcodes";
@@ -260,7 +308,7 @@ export function registerRpcSurface(
   });
 
   ctx.actions.register("retry_connection", async () => {
-    if (!client) throw prerequisiteMissingError();
+    if (!client) throw prerequisiteMissingError(prereqMessage);
     await client.retryConnection();
     return { ok: true, connection: client.getConnectionState() };
   });
@@ -276,12 +324,13 @@ export function registerRpcSurface(
     {
       displayName: "Klipper Get Printer Status",
       description:
-        "Return the latest Moonraker status snapshot (printer state, " +
-        "temperatures, virtual_sdcard progress, display message).",
+        "Return the latest printer status snapshot (state, temperatures, " +
+        "progress, active job) from the configured transport — Moonraker or " +
+        "the FlashForge LAN-only HTTP API.",
       parametersSchema: { type: "object", properties: {}, additionalProperties: false },
     },
     async (): Promise<ToolResult> => {
-      if (!client) return prerequisiteMissingToolResult();
+      if (!client) return prerequisiteMissingToolResult(prereqMessage);
       try {
         const snapshot = client.getStatusSnapshot();
         return { data: snapshot };
@@ -335,7 +384,7 @@ export function registerRpcSurface(
       },
     },
     async (params, runCtx): Promise<ToolResult> => {
-      if (!client) return prerequisiteMissingToolResult();
+      if (!client) return prerequisiteMissingToolResult(prereqMessage);
       // Re-read config live on every dispatch — never gate off the value
       // captured at setup(). Fails closed if the read errors.
       const liveConfig = await readLiveConfig(ctx, "upload_gcode");
@@ -435,7 +484,7 @@ export function registerRpcSurface(
       },
     },
     async (params): Promise<ToolResult> => {
-      if (!client) return prerequisiteMissingToolResult();
+      if (!client) return prerequisiteMissingToolResult(prereqMessage);
       // Re-read config live on every dispatch — never gate off the value
       // captured at setup(). Fails closed if the read errors.
       const liveConfig = await readLiveConfig(ctx, "start_print");
@@ -472,6 +521,18 @@ function toolError(err: unknown, toolName: string): ToolResult {
     };
   }
   if (err instanceof MoonrakerOutboundScopeError) {
+    return { error: `${toolName}: refused — ${err.message}` };
+  }
+  if (err instanceof FlashForgeApiError) {
+    return {
+      error: `${toolName}: ${err.message}`,
+      data: {
+        status: err.status,
+        envelopeCode: err.envelopeCode,
+      },
+    };
+  }
+  if (err instanceof FlashForgeOutboundScopeError) {
     return { error: `${toolName}: refused — ${err.message}` };
   }
   return {
