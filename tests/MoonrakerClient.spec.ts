@@ -151,6 +151,35 @@ describe("MoonrakerClient REST", () => {
     );
   });
 
+  it("accepts an OBJECT-shaped api key ref and forwards the resolved key", async () => {
+    // Current hosts bind config secrets as
+    // { type: "secret_ref", secretId, version? } and reject string refs at
+    // resolution time, so the whole config→client→wire path must carry the
+    // object through verbatim.
+    const UUID = "690a5384-1234-4abc-8abc-000000000001";
+    const resolveCalls: unknown[] = [];
+    const { harness } = harnessWithStreams({
+      moonrakerBaseUrl: mock.baseUrl(),
+      moonrakerApiKeyRef: { type: "secret_ref", secretId: UUID },
+    });
+    const origResolve = harness.ctx.secrets.resolve.bind(harness.ctx.secrets);
+    harness.ctx.secrets.resolve = (async (ref: string) => {
+      resolveCalls.push(ref);
+      return RESOLVED_KEY;
+    }) as typeof harness.ctx.secrets.resolve;
+
+    const { client } = expectClient(await createKlipperWorker(harness.ctx, { autoStart: false }));
+    const info = await client.getPrinterInfo();
+    expect(info.state).toBe("ready");
+
+    // The object reached the secrets client untouched.
+    expect(resolveCalls).toEqual([{ type: "secret_ref", secretId: UUID }]);
+    // The resolved key authenticated against the mock Moonraker.
+    expect(mock.seenApiKeys.has(RESOLVED_KEY)).toBe(true);
+    assertNoApiKeyLeak([harness.logs], RESOLVED_KEY);
+    void origResolve;
+  });
+
   it("uploads multipart G-code", async () => {
     const { harness } = harnessWithStreams({
       moonrakerBaseUrl: mock.baseUrl(),

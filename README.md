@@ -41,6 +41,30 @@ Config keys (all three required when the transport is selected):
 | `flashforgeSerialNumber` | string | The Device ID shown in the printer's *Network > LAN Only* settings. An identifier, not a credential. |
 | `flashforgeCheckCodeRef` | secret-ref | The per-printer check code (the LAN-mode credential). Resolved per call via `ctx.secrets.resolve`; never stored or logged. |
 
+#### Secret-reference shapes (both ref keys)
+
+`moonrakerApiKeyRef` and `flashforgeCheckCodeRef` accept **two shapes**:
+
+- **Binding object (preferred on current hosts)** — what the host settings UI
+  submits and what the host persists as a company-scoped secret binding when
+  the config is saved:
+
+  ```json
+  { "type": "secret_ref", "secretId": "<secret UUID>", "version": "latest" }
+  ```
+
+  `version` is optional (`"latest"` or a positive integer; absent behaves as
+  `"latest"`). `secretId` must be the secret's UUID.
+- **Legacy string ref** — a bare secret name/UUID string, kept for backward
+  compatibility with configs written before object bindings existed. Note
+  that current host generations refuse to RESOLVE bare-UUID string refs (the
+  per-tenant config-overrides route answers 422 for them), so new setups
+  should always use the object shape.
+
+Either way the plaintext value is resolved per call via `ctx.secrets.resolve`
+and is never stored, logged, or cached; a missing or unresolvable ref refuses
+the transport at load (fail closed — no silent fallback).
+
 Endpoint shapes follow the printer's LAN-only HTTP API (`POST /detail`,
 `/gcodeList`, `/uploadGcode`, `/printGcode`, `/control`): JSON endpoints carry
 the serial number and check code in the request body; uploads carry them in
@@ -54,7 +78,11 @@ files; starting a print stays an operator action):
   "transport": "flashforge",
   "flashforgeBaseUrl": "http://192.168.1.50:8898",
   "flashforgeSerialNumber": "<Device ID from the printer network settings>",
-  "flashforgeCheckCodeRef": "<secret ref holding the check code>",
+  "flashforgeCheckCodeRef": {
+    "type": "secret_ref",
+    "secretId": "<secret UUID>",
+    "version": "latest"
+  },
   "auto_upload_artifacts": true,
   "allow_agent_initiated_print": false
 }

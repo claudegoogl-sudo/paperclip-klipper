@@ -26,6 +26,7 @@ import type {
   PluginSecretsClient,
   PluginLogger,
 } from "@paperclipai/plugin-sdk";
+import { resolveSecretRef, type SecretRef } from "./secretRef.js";
 
 /** Subset of Moonraker printer objects the dashboard widget cares about. */
 export const DEFAULT_SUBSCRIBED_OBJECTS = {
@@ -146,8 +147,12 @@ export type WebSocketFactory = (url: string) => WebSocketLike;
 export interface MoonrakerClientOptions {
   /** Base URL (e.g. `http://printer.lan` or `http://printer.lan:7125`). */
   baseUrl: string;
-  /** Secret ref for the Moonraker API key. Optional for unauthenticated. */
-  apiKeyRef?: string;
+  /**
+   * Secret ref for the Moonraker API key. Optional for unauthenticated
+   * instances. Accepts both the legacy string shape and the object binding
+   * ref; passed to `ctx.secrets.resolve` exactly as configured.
+   */
+  apiKeyRef?: SecretRef;
   http: PluginHttpClient;
   secrets: PluginSecretsClient;
   logger: PluginLogger;
@@ -532,7 +537,7 @@ export class MoonrakerClient {
    */
   private async resolveApiKey(): Promise<string | null> {
     if (!this.opts.apiKeyRef) return null;
-    return this.opts.secrets.resolve(this.opts.apiKeyRef);
+    return resolveSecretRef(this.opts.secrets, this.opts.apiKeyRef);
   }
 
   private async requestJson<T>(
