@@ -12,6 +12,10 @@ import {
   type KlipperConfig,
 } from "./worker/registerRpcSurface.js";
 import { validateMoonrakerBaseUrl } from "./worker/validateMoonrakerBaseUrl.js";
+import {
+  canonicalSecretRefIdentity,
+  type SecretRef,
+} from "./worker/secretRef.js";
 import { FlashForgeClient } from "./worker/transports/FlashForgeClient.js";
 import {
   describeFlashForgeConfigFailure,
@@ -137,7 +141,12 @@ function connectionFingerprint(config: Partial<KlipperConfig>): string {
     "moonraker",
     config.moonrakerBaseUrl ?? null,
     [...(config.moonrakerAllowedHosts ?? [])].sort(),
-    config.moonrakerApiKeyRef ?? null,
+    // Canonical per-shape identity: legacy strings keep their raw value,
+    // object binding refs canonicalize to secretId+version so key-order
+    // differences in a replayed config stay the SAME connection.
+    config.moonrakerApiKeyRef === undefined
+      ? null
+      : canonicalSecretRefIdentity(config.moonrakerApiKeyRef as SecretRef),
   ]);
 }
 
@@ -154,7 +163,7 @@ function flashforgeFingerprint(config: Partial<KlipperConfig>): string | null {
     "flashforge",
     validated.config.baseUrl,
     validated.config.serialNumber,
-    validated.config.checkCodeRef,
+    canonicalSecretRefIdentity(validated.config.checkCodeRef),
     [...(validated.config.allowedHosts ?? [])].sort(),
   ]);
 }

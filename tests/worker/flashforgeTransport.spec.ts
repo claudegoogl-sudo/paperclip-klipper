@@ -401,3 +401,83 @@ describe("transport config selection helpers (AC1)", () => {
     if (!notAllowed.ok) expect(notAllowed.reason).toBe("host_not_allowed");
   });
 });
+
+/**
+ * Object-shaped secret binding ref, end to end: the host binds config
+ * secrets as { type: "secret_ref", secretId, version? } and rejects legacy
+ * string refs at resolution time, so the operator-submitted object must
+ * survive manifest validation → transport validation → the secrets client →
+ * the printer request with the resolved check code authenticating exactly
+ * as it does for string refs.
+ */
+describe("worker — flashforge transport with object checkCodeRef (mock printer)", () => {
+  const UUID = "690a5384-1234-4abc-8abc-000000000001";
+  const OBJECT_REF_CHECK_CODE = "resolved-object-ref-check-code";
+  let mock: MockFlashForge;
+
+  beforeEach(async () => {
+    mock = new MockFlashForge({
+      serialNumber: SERIAL,
+      checkCode: OBJECT_REF_CHECK_CODE,
+      gcodeList: ["bracket.gcode"],
+    });
+    await mock.start();
+  });
+
+  afterEach(async () => {
+    await mock.stop();
+  });
+
+  it("upload authenticates with the resolved check code from the object ref", async () => {
+    const resolveCalls: unknown[] = [];
+    const harness = createTestHarness({
+      manifest,
+      capabilities: [...CAPABILITIES],
+      config: {
+        transport: "flashforge",
+        flashforgeBaseUrl: mock.baseUrl(),
+        flashforgeSerialNumber: SERIAL,
+        flashforgeCheckCodeRef: { type: "secret_ref", secretId: UUID },
+        auto_upload_artifacts: true,
+      },
+    });
+    const origResolve = harness.ctx.secrets.resolve.bind(harness.ctx.secrets);
+    harness.ctx.secrets.resolve = (async (ref: string) => {
+      resolveCalls.push(ref);
+      return OBJECT_REF_CHECK_CODE;
+    }) as typeof harness.ctx.secrets.resolve;
+    void origResolve;
+
+    await createKlipperWorker(harness.ctx, {
+      autoStart: false,
+      flashforgeClientOverrides: { pollIntervalMs: 60_000 },
+    });
+
+    const result = await harness.executeTool<{
+      data?: { item?: { path: string } };
+      error?: string;
+    }>(
+      "klipper.upload_gcode",
+      { filename: "bracket.gcode", artifactId: ARTIFACT_ID },
+      artifactCtx(),
+    );
+
+    expect(result.error).toBeUndefined();
+    expect(result.data?.item?.path).toBe("bracket.gcode");
+
+    // The object ref flowed through the validator (normalized: explicit
+    // "latest") and the resolved value authenticated against the printer.
+    expect(resolveCalls).toEqual([{ type: "secret_ref", secretId: UUID, version: "latest" }]);
+    const uploadReq = mock.recordedRequests.find((r) => r.url === "/uploadGcode");
+    expect(uploadReq).toBeDefined();
+    const h = (name: string) => {
+      const raw = uploadReq!.headers[name];
+      return Array.isArray(raw) ? raw[0] : raw;
+    };
+    expect(h("checkcode")).toBe(OBJECT_REF_CHECK_CODE);
+
+    // The check code never leaked into the harness log surface.
+    const flat = JSON.stringify(harness.logs);
+    expect(flat.includes(OBJECT_REF_CHECK_CODE)).toBe(false);
+  });
+});

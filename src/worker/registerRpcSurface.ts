@@ -26,6 +26,7 @@ import {
   FlashForgeOutboundScopeError,
 } from "./transports/FlashForgeClient.js";
 import type { PrinterTransport } from "./transports/PrinterTransport.js";
+import type { SecretRef } from "./secretRef.js";
 
 /**
  * Upper bound on the *decompressed* g-code we will hand to Moonraker. Real
@@ -52,7 +53,12 @@ export interface KlipperConfig {
    * out of `moonrakerBaseUrl` itself — see `validateMoonrakerBaseUrl.ts`.
    */
   moonrakerAllowedHosts?: string[];
-  moonrakerApiKeyRef?: string;
+  /**
+   * Secret ref for the Moonraker API key — legacy string shape or the
+   * object binding ref ({ type: "secret_ref", secretId, version? }).
+   * Resolved per call; never stored in plaintext.
+   */
+  moonrakerApiKeyRef?: SecretRef;
   /**
    * FlashForge transport (Creator 5 LAN-only HTTP API). All three keys are
    * required together when `transport: "flashforge"`; validation is
@@ -63,8 +69,12 @@ export interface KlipperConfig {
   flashforgeAllowedHosts?: string[];
   /** Printer serial number — the LAN-mode Device ID (identifier, not secret). */
   flashforgeSerialNumber?: string;
-  /** Secret reference for the per-printer check code credential. */
-  flashforgeCheckCodeRef?: string;
+  /**
+   * Secret reference for the per-printer check code credential — legacy
+   * string shape or the object binding ref. Resolved per request; never
+   * stored in plaintext.
+   */
+  flashforgeCheckCodeRef?: SecretRef;
   auto_upload_artifacts?: boolean;
   allow_agent_initiated_print?: boolean;
 }

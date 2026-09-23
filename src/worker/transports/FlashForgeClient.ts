@@ -38,6 +38,7 @@ import type {
   PluginSecretsClient,
   PluginLogger,
 } from "@paperclipai/plugin-sdk";
+import { resolveSecretRef, type SecretRef } from "../secretRef.js";
 import type {
   ConnectionStateSnapshot,
   FileListEntry,
@@ -150,8 +151,13 @@ export interface FlashForgeClientOptions {
   baseUrl: string;
   /** Printer serial number — the LAN-mode Device ID (an identifier, not a secret). */
   serialNumber: string;
-  /** Secret ref for the per-printer check code credential. */
-  checkCodeRef: string;
+  /**
+   * Secret ref for the per-printer check code credential — either the
+   * legacy string shape or the object binding ref; passed to
+   * `ctx.secrets.resolve` exactly as configured (fail closed if the host
+   * cannot resolve it).
+   */
+  checkCodeRef: SecretRef;
   http: PluginHttpClient;
   secrets: PluginSecretsClient;
   logger: PluginLogger;
@@ -272,7 +278,7 @@ export class FlashForgeClient implements PrinterTransport {
 
   private readonly baseUrl: URL;
   private readonly serialNumber: string;
-  private readonly checkCodeRef: string;
+  private readonly checkCodeRef: SecretRef;
   private readonly http: PluginHttpClient;
   private readonly secrets: PluginSecretsClient;
   private readonly logger: PluginLogger;
@@ -579,7 +585,7 @@ export class FlashForgeClient implements PrinterTransport {
 
   /** Resolve the check code per call; never cached, never logged. */
   private async resolveCheckCode(): Promise<string> {
-    return this.secrets.resolve(this.checkCodeRef);
+    return resolveSecretRef(this.secrets, this.checkCodeRef);
   }
 
   /**

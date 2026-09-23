@@ -38,6 +38,41 @@ import type { PaperclipPluginManifestV1 } from "@paperclipai/plugin-sdk";
 // `package.json.version` by esbuild's `define` (see `esbuild.config.mjs`).
 // Using `package.json.version` as the single source of truth means the
 // installed plugin's reported version cannot drift from the package version.
+
+/**
+ * JSON-Schema branch for the object-shaped secret binding ref accepted by
+ * current host generations: `{ type: "secret_ref", secretId, version? }`.
+ * Kept in lockstep with the server's binding parser (secretId is a UUID;
+ * version is "latest" or a positive integer; absent collapses to "latest";
+ * unknown keys rejected so a typo like `secretID` fails at save time, not
+ * at first resolve). `secret-ref` secret paths keep a string branch (with
+ * `format: "secret-ref"`) because hosts detect bindable config paths by
+ * that format marker and reject legacy bare-UUID string VALUES there with
+ * an explicit 422 — while non-secret string refs (names) from older
+ * configs still validate and resolve the way they always did.
+ *
+ * IMPORTANT: `format: "secret-ref"` is therefore repeated on the property
+ * ITSELF (not only inside a branch) — the host's path walker reads format
+ * directly off each property schema and never consults branch formats for
+ * path detection.
+ */
+const SECRET_REF_OBJECT_SCHEMA = {
+  type: "object",
+  properties: {
+    type: { enum: ["secret_ref"] },
+    secretId: {
+      type: "string",
+      pattern:
+        "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+    },
+    version: {
+      anyOf: [{ enum: ["latest"] }, { type: "integer", minimum: 1 }],
+    },
+  },
+  required: ["type", "secretId"],
+  additionalProperties: false,
+} as const;
+
 const manifest: PaperclipPluginManifestV1 = {
   id: "platform.klipper",
   apiVersion: 1,
@@ -66,10 +101,13 @@ const manifest: PaperclipPluginManifestV1 = {
   // being passed to the worker via `ctx.config.get()`.
   //   - moonrakerBaseUrl: full base URL (e.g. https://printer.lan) — the
   //     worker scopes ALL outbound HTTP and WebSocket traffic to this host.
-  //   - moonrakerApiKeyRef: secret reference (UUID/name) for the Moonraker
-  //     API key. format:'secret-ref' tells the host to resolve via the
-  //     secret provider; plaintext is rejected. Optional — public Moonraker
-  //     instances can omit the key.
+  //   - moonrakerApiKeyRef / flashforgeCheckCodeRef: secret references for
+  //     the Moonraker API key and the FlashForge check code. Accepted as the
+  //     legacy string ref or the object binding ref
+  //     { type: "secret_ref", secretId, version? } — current hosts persist
+  //     the object shape as a company-scoped binding at config-save time and
+  //     resolve it per call; the plaintext value never reaches config,
+  //     state, or logs. Optional per transport.
   //   - auto_upload_artifacts: when true, the worker may auto-upload
   //     produced G-code artifacts to the printer. Default off so the
   //     installed plugin is inert until the operator opts in (6.5 will
@@ -116,12 +154,26 @@ const manifest: PaperclipPluginManifestV1 = {
           "later resolves to.",
       },
       moonrakerApiKeyRef: {
-        type: "string",
+        // `format` stays on the PROPERTY itself: hosts detect bindable
+        // secret paths (and the settings-UI secret picker) by reading
+        // `format` directly off the property schema — a format hidden
+        // inside a oneOf branch is invisible to that walk.
         format: "secret-ref",
+        oneOf: [
+          { type: "string" },
+          SECRET_REF_OBJECT_SCHEMA,
+        ],
         description:
-          "Paperclip secret reference for the Moonraker API key. Resolved " +
-          "per call via ctx.secrets.resolve; never stored in plaintext. " +
-          "Omit for unauthenticated Moonraker instances.",
+          "Paperclip secret reference for the Moonraker API key. Two " +
+          "accepted shapes: the legacy string ref kept for backward " +
+          "compatibility, or the binding object { type: \"secret_ref\", " +
+          "secretId, version? } that current hosts persist as a " +
+          "company-scoped binding when this config is saved (the object " +
+          "shape is what the host settings UI submits). Either shape is " +
+          "resolved per call via ctx.secrets.resolve; the plaintext value " +
+          "is never stored, logged, or cached. A missing/unresolvable ref " +
+          "refuses the transport at load (fail closed). Omit for " +
+          "unauthenticated Moonraker instances.",
       },
       flashforgeBaseUrl: {
         type: "string",
@@ -150,13 +202,24 @@ const manifest: PaperclipPluginManifestV1 = {
           "credential; sent with every FlashForge request.",
       },
       flashforgeCheckCodeRef: {
-        type: "string",
+        // See moonrakerApiKeyRef: `format` must sit on the property itself.
         format: "secret-ref",
+        oneOf: [
+          { type: "string" },
+          SECRET_REF_OBJECT_SCHEMA,
+        ],
         description:
           "Paperclip secret reference for the per-printer check code " +
-          "(the LAN-mode credential shown next to the Device ID). Resolved " +
-          "per call via ctx.secrets.resolve; never stored in plaintext and " +
-          "never logged.",
+          "(the LAN-mode credential shown next to the Device ID). Two " +
+          "accepted shapes: the legacy string ref kept for backward " +
+          "compatibility, or the binding object { type: \"secret_ref\", " +
+          "secretId, version? } that current hosts persist as a " +
+          "company-scoped binding when this config is saved (the object " +
+          "shape is what the host settings UI submits). Either shape is " +
+          "resolved per request via ctx.secrets.resolve; the check code is " +
+          "never stored in plaintext, never cached, and never logged. A " +
+          "missing/unresolvable ref refuses the transport at load (fail " +
+          "closed).",
       },
       auto_upload_artifacts: {
         type: "boolean",

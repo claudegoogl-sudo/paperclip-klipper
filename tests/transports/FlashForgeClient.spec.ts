@@ -405,3 +405,105 @@ describe("FlashForge machine-state mapping", () => {
     expect(fallback.extruder).toMatchObject({ temperature: 25, target: 0 });
   });
 });
+
+/**
+ * Object-shaped secret binding refs. Current host generations bind config
+ * secrets as { type: "secret_ref", secretId, version? } and REJECT legacy
+ * string refs at resolution time, so the transport must carry the object
+ * through to ctx.secrets.resolve untouched and the resolved check code must
+ * reach the wire exactly as it does for string refs.
+ */
+describe("FlashForgeClient — object-shaped check code ref", () => {
+  const UUID = "690a5384-1234-4abc-8abc-000000000001";
+  let mock: MockFlashForge;
+  let logs: CapturedLog[];
+
+  beforeEach(async () => {
+    mock = new MockFlashForge({ serialNumber: SERIAL, checkCode: CHECK_CODE });
+    await mock.start();
+    logs = [];
+  });
+
+  afterEach(async () => {
+    await mock.stop();
+  });
+
+  function makeSpySecrets(
+    resolvedCheckCode: string,
+    calls: unknown[],
+  ): PluginSecretsClient {
+    return {
+      async resolve(ref: string) {
+        calls.push(ref);
+        return resolvedCheckCode;
+      },
+    };
+  }
+
+  it("resolves the object ref per request and delivers the same check code to the wire", async () => {
+    const calls: unknown[] = [];
+    const client = new FlashForgeClient({
+      baseUrl: mock.baseUrl(),
+      serialNumber: SERIAL,
+      checkCodeRef: { type: "secret_ref", secretId: UUID },
+      http: makeHttp(),
+      secrets: makeSpySecrets(CHECK_CODE, calls),
+      logger: makeCapturingLogger(logs),
+      pollIntervalMs: 60_000,
+    });
+
+    const payload = new Uint8Array([0x47, 0x31, 0x0a]); // "G1\n"
+    const result = await client.uploadGcode("bracket.gcode", payload);
+
+    // The OBJECT reached the secrets client verbatim — no coercion to a
+    // string, no silent fallback.
+    expect(calls).toEqual([{ type: "secret_ref", secretId: UUID }]);
+
+    // The RESOLVED VALUE authenticates exactly as with a string ref.
+    const upload = mock.recordedRequests.find((r) => r.url === "/uploadGcode");
+    expect(upload).toBeDefined();
+    expect(headerOf({ headers: upload!.headers }, "checkcode")).toBe(CHECK_CODE);
+    expect(result.item.path).toBe("bracket.gcode");
+  });
+
+  it("pins the version through to the secrets client when configured", async () => {
+    const calls: unknown[] = [];
+    const client = new FlashForgeClient({
+      baseUrl: mock.baseUrl(),
+      serialNumber: SERIAL,
+      checkCodeRef: { type: "secret_ref", secretId: UUID, version: 2 },
+      http: makeHttp(),
+      secrets: makeSpySecrets(CHECK_CODE, calls),
+      logger: makeCapturingLogger(logs),
+      pollIntervalMs: 60_000,
+    });
+
+    await client.probeHealth();
+
+    expect(calls).toEqual([{ type: "secret_ref", secretId: UUID, version: 2 }]);
+    const detail = mock.recordedRequests.find((r) => r.url === "/detail");
+    expect(detail).toBeDefined();
+  });
+
+  it("refuses the request (fail closed) when the host cannot resolve the object ref", async () => {
+    const client = new FlashForgeClient({
+      baseUrl: mock.baseUrl(),
+      serialNumber: SERIAL,
+      checkCodeRef: { type: "secret_ref", secretId: UUID },
+      http: makeHttp(),
+      secrets: {
+        async resolve() {
+          throw new Error("Secret is not bound to plugin at flashforgeCheckCodeRef");
+        },
+      },
+      logger: makeCapturingLogger(logs),
+      pollIntervalMs: 60_000,
+    });
+
+    await expect(
+      client.uploadGcode("x.gcode", new Uint8Array([1])),
+    ).rejects.toThrow(/not bound to plugin/i);
+    // Nothing reached the printer.
+    expect(mock.recordedRequests).toHaveLength(0);
+  });
+});

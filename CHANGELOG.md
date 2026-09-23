@@ -5,6 +5,43 @@ plugin follows semver against the host plugin API (PLA-526 keeps
 `package.json.version` and the manifest version in lockstep via the build
 `define`).
 
+## 0.2.2 — 2026-09-23
+
+### Added
+- **Object-shaped secret-ref support on the config bind path.** Current host
+  generations bind plugin config secrets as
+  `{ type: "secret_ref", secretId, version? }`: the per-tenant
+  config-overrides route validates the object shape against the manifest
+  schema, persists it as a company-scoped binding at save time, and the
+  worker-side `secrets.resolve` refuses STRING refs outright. With the 0.2.1
+  manifest (string-only `format: "secret-ref"` fields) no secret could be
+  bound at all on those hosts — the object shape was rejected by schema
+  validation while the bare-UUID string shape was rejected by the binding
+  gate. Both `moonrakerApiKeyRef` and `flashforgeCheckCodeRef` now accept
+  **both shapes** via a `oneOf` schema (the `format: "secret-ref"` marker
+  stays on the property itself, where the host's bindable-path walk and the
+  settings-UI secret picker read it). Legacy string configs stay valid;
+  malformed object refs fail at save time with a field error instead of at
+  first resolve.
+
+### Changed
+- Transport config validation, config fingerprints, and both transports
+  (Moonraker + FlashForge) carry either ref shape end to end. Object refs
+  are normalized (secretId trimmed, absent version collapsed to
+  `"latest"`) before they reach the secrets client; fingerprint identity
+  canonicalizes object refs so a re-serialized replay (different key order)
+  keeps the live client, while a different secretId or pinned version
+  replaces it. Legacy string refs keep their raw value as identity — no
+  identity churn for existing configs.
+
+### Security
+- Fail-closed posture unchanged: a missing/unresolvable ref still refuses
+  the transport with a clear error; resolved values still never touch logs,
+  state, or config; the resolved check code still reaches FlashForge request
+  bodies/headers exactly as before. Capability list is byte-identical to
+  0.2.1 (`http.outbound`, `secrets.read-ref`, `agent.tools.register`,
+  `events.subscribe`, `ui.page.register`).
+
 ## 0.2.1 — 2026-09-23
 
 ### Security (non-blocking findings from the FlashForge transport review)

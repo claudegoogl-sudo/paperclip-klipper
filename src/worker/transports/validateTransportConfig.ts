@@ -14,7 +14,20 @@
  *     protocol + host equality, host allowlist (default: the URL's own
  *     host). The FlashForge default LAN port 8898 is applied when the URL
  *     omits one.
+ *   - flashforgeCheckCodeRef accepts BOTH secret-ref shapes: the legacy
+ *     non-empty string and the binding object
+ *     { type: "secret_ref", secretId, version? }. The ref is passed to
+ *     ctx.secrets.resolve exactly as configured — the host decides what it
+ *     can resolve, and an unresolvable ref refuses the request path (fail
+ *     closed). A malformed object ref is reported as a missing field, never
+ *     silently coerced to string semantics.
  */
+
+import {
+  isConfiguredSecretRef,
+  normalizedSecretRef,
+  type SecretRef,
+} from "../secretRef.js";
 
 /** Default FlashForge LAN-mode HTTP port when the base URL omits one. */
 const FLASHFORGE_DEFAULT_PORT = 8898;
@@ -52,7 +65,8 @@ export interface FlashForgeConnectionConfig {
   baseUrl: string;
   allowedHosts?: string[];
   serialNumber: string;
-  checkCodeRef: string;
+  /** Either secret-ref shape, normalized; resolved per request, never cached. */
+  checkCodeRef: SecretRef;
 }
 
 export type FlashForgeConfigValidation =
@@ -86,10 +100,15 @@ export function validateFlashForgeConfig(config: {
     typeof config.flashforgeSerialNumber === "string"
       ? config.flashforgeSerialNumber.trim()
       : "";
-  const checkCodeRef =
-    typeof config.flashforgeCheckCodeRef === "string"
-      ? config.flashforgeCheckCodeRef.trim()
-      : "";
+  // Either ref shape: a non-empty legacy string, or a well-formed
+  // { type: "secret_ref", secretId, version? } binding object. Anything else
+  // (empty string, malformed object, wrong types) counts as missing so the
+  // operator sees one clear fail-closed error instead of a runtime surprise.
+  const checkCodeRef: SecretRef | null = isConfiguredSecretRef(
+    config.flashforgeCheckCodeRef,
+  )
+    ? normalizedSecretRef(config.flashforgeCheckCodeRef as SecretRef)
+    : null;
   if (!baseUrlRaw) missing.push("flashforgeBaseUrl");
   if (!serialNumber) missing.push("flashforgeSerialNumber");
   if (!checkCodeRef) missing.push("flashforgeCheckCodeRef");
@@ -147,7 +166,8 @@ export function validateFlashForgeConfig(config: {
       baseUrl: url.toString(),
       ...(allowedHosts ? { allowedHosts } : {}),
       serialNumber,
-      checkCodeRef,
+      // The missing-fields guard above guarantees this is a usable ref.
+      checkCodeRef: checkCodeRef as SecretRef,
     },
   };
 }
