@@ -58,9 +58,15 @@ describe("paperclip-klipper manifest", () => {
       "klipper.upload_gcode",
       "klipper.start_print",
     ]);
+    // `required` is intentionally empty: since the flashforge transport
+    // landed, required keys are per-transport (moonrakerBaseUrl for
+    // moonraker; flashforgeBaseUrl + flashforgeSerialNumber +
+    // flashforgeCheckCodeRef for flashforge) and are enforced fail-closed
+    // by the worker at config-apply time. A static required list here would
+    // force flashforge-only companies to also set moonrakerBaseUrl.
     expect(manifest.instanceConfigSchema).toMatchObject({
       type: "object",
-      required: ["moonrakerBaseUrl"],
+      required: [],
       additionalProperties: false,
     });
     const props = (manifest.instanceConfigSchema as { properties: Record<string, unknown> }).properties;

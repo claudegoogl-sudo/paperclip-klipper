@@ -7,12 +7,15 @@ import type { PaperclipPluginManifestV1 } from "@paperclipai/plugin-sdk";
  * **only** the capabilities required by the spec; any expansion is a separate
  * governance ticket per the plan brief.
  *
- *   - http.outbound          — Moonraker REST API and Moonraker /websocket.
- *                              The host has no separate outbound-WebSocket
- *                              capability today; WS upgrades ride the same
- *                              outbound network grant (HTTP/1.1 Upgrade) and
- *                              the worker enforces the configured Moonraker
- *                              base URL as the only permitted host.
+ *   - http.outbound          — Moonraker REST API and Moonraker /websocket,
+ *                              or the FlashForge Creator 5 LAN-only HTTP API
+ *                              (transport=flashforge). The host has no
+ *                              separate outbound-WebSocket capability today;
+ *                              WS upgrades ride the same outbound network
+ *                              grant (HTTP/1.1 Upgrade) and the worker
+ *                              enforces the configured printer base URL as
+ *                              the only permitted host for the active
+ *                              transport.
  *   - secrets.read-ref       — resolve the Moonraker API key per call via
  *                              `ctx.secrets.resolve(config.moonrakerApiKeyRef)`.
  *                              The plaintext value is NEVER cached, logged, or
@@ -79,6 +82,19 @@ const manifest: PaperclipPluginManifestV1 = {
   instanceConfigSchema: {
     type: "object",
     properties: {
+      transport: {
+        type: "string",
+        enum: ["moonraker", "flashforge"],
+        description:
+          "Printer transport. Absent/unset behaves exactly like " +
+          "\"moonraker\" (the historical behavior). \"flashforge\" drives " +
+          "FlashForge-firmware printers (Creator 5 / Creator 5 Pro) through " +
+          "their LAN-only HTTP API and requires the flashforge* config keys " +
+          "(flashforgeBaseUrl, flashforgeSerialNumber, " +
+          "flashforgeCheckCodeRef); incomplete flashforge config fails closed " +
+          "at load with a clear validation error — it never falls back to " +
+          "moonraker. Any other value is rejected by this enum.",
+      },
       moonrakerBaseUrl: {
         type: "string",
         format: "uri",
@@ -107,6 +123,40 @@ const manifest: PaperclipPluginManifestV1 = {
           "per call via ctx.secrets.resolve; never stored in plaintext. " +
           "Omit for unauthenticated Moonraker instances.",
       },
+      flashforgeBaseUrl: {
+        type: "string",
+        format: "uri",
+        description:
+          "FlashForge printer base URL (e.g. http://192.168.1.50:8898). " +
+          "Port 8898 is applied when omitted. Required when transport is " +
+          "\"flashforge\"; all FlashForge traffic is restricted to this host.",
+      },
+      flashforgeAllowedHosts: {
+        type: "array",
+        items: { type: "string" },
+        minItems: 1,
+        description:
+          "Optional host allowlist for flashforgeBaseUrl (mirrors " +
+          "moonrakerAllowedHosts). Defaults to the single host parsed out " +
+          "of flashforgeBaseUrl itself.",
+      },
+      flashforgeSerialNumber: {
+        type: "string",
+        minLength: 1,
+        description:
+          "Printer serial number — the Device ID the Creator 5 LAN-only " +
+          "mode exposes in its network settings. An identifier, not a " +
+          "credential; sent with every FlashForge request.",
+      },
+      flashforgeCheckCodeRef: {
+        type: "string",
+        format: "secret-ref",
+        description:
+          "Paperclip secret reference for the per-printer check code " +
+          "(the LAN-mode credential shown next to the Device ID). Resolved " +
+          "per call via ctx.secrets.resolve; never stored in plaintext and " +
+          "never logged.",
+      },
       auto_upload_artifacts: {
         type: "boolean",
         default: false,
@@ -122,7 +172,12 @@ const manifest: PaperclipPluginManifestV1 = {
           "without per-call human confirmation. Defaults to false (opt-in).",
       },
     },
-    required: ["moonrakerBaseUrl"],
+    // Per-transport required keys are enforced fail-closed by the worker at
+    // config-apply time (moonrakerBaseUrl for the moonraker transport;
+    // flashforgeBaseUrl + flashforgeSerialNumber + flashforgeCheckCodeRef
+    // for flashforge) because a static `required` list here would force
+    // flashforge-only companies to also set moonrakerBaseUrl.
+    required: [],
     additionalProperties: false,
   },
 
@@ -135,8 +190,9 @@ const manifest: PaperclipPluginManifestV1 = {
       name: "klipper.get_printer_status",
       displayName: "Klipper Get Printer Status",
       description:
-        "Stub — returns Moonraker printer status (state, temperatures, " +
-        "active job). Real implementation lands in 6.5.",
+        "Returns the latest printer status snapshot (state, temperatures, " +
+        "active job) from the configured transport — Moonraker or the " +
+        "FlashForge LAN-only HTTP API.",
       parametersSchema: {
         type: "object",
         properties: {},

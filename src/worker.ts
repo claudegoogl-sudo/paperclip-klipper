@@ -6,11 +6,19 @@ import {
   type MoonrakerClientOptions,
   type MoonrakerStatusSnapshot,
 } from "./worker/MoonrakerClient.js";
+import type { FlashForgeClientOptions } from "./worker/transports/FlashForgeClient.js";
 import {
   registerRpcSurface,
   type KlipperConfig,
 } from "./worker/registerRpcSurface.js";
 import { validateMoonrakerBaseUrl } from "./worker/validateMoonrakerBaseUrl.js";
+import { FlashForgeClient } from "./worker/transports/FlashForgeClient.js";
+import {
+  describeFlashForgeConfigFailure,
+  selectTransport,
+  validateFlashForgeConfig,
+} from "./worker/transports/validateTransportConfig.js";
+import type { PrinterTransport } from "./worker/transports/PrinterTransport.js";
 
 /**
  * paperclip-klipper worker.
@@ -71,6 +79,8 @@ export interface CreateKlipperWorkerOptions {
    * `random` so backoff is predictable.
    */
   clientOverrides?: Partial<MoonrakerClientOptions>;
+  /** Override FlashForgeClient construction (test-only hook). */
+  flashforgeClientOverrides?: Partial<FlashForgeClientOptions>;
 }
 
 /** Where a config snapshot came from — named in logs for boot observability. */
@@ -78,12 +88,13 @@ export type KlipperConfigSource = "setup" | "configChanged";
 
 export interface KlipperWorker {
   /**
-   * MoonrakerClient instance, or `null` when the worker is running without a
-   * usable `moonrakerBaseUrl` (config not yet replayed, absent, or rejected
-   * by validation). Tool / action / data handlers gate on client presence and
-   * surface `prerequisite_missing` (mirroring the CAD plugin pattern).
+   * Active printer transport (MoonrakerClient or FlashForgeClient), or
+   * `null` when the worker is running without usable transport config (config
+   * not yet replayed, absent, or rejected by validation). Tool / action /
+   * data handlers gate on client presence and surface
+   * `prerequisite_missing` (mirroring the CAD plugin pattern).
    */
-  client: MoonrakerClient | null;
+  client: PrinterTransport | null;
   config: KlipperConfig;
   /**
    * `false` while the setup-time read was denied (service context) and no
@@ -123,10 +134,38 @@ export interface KlipperWorker {
  */
 function connectionFingerprint(config: Partial<KlipperConfig>): string {
   return JSON.stringify([
+    "moonraker",
     config.moonrakerBaseUrl ?? null,
     [...(config.moonrakerAllowedHosts ?? [])].sort(),
     config.moonrakerApiKeyRef ?? null,
   ]);
+}
+
+/**
+ * Connection-identity fingerprint for the flashforge transport. Derived from
+ * the VALIDATED config so the applied default port is part of the identity
+ * (`http://host` and `http://host:8898` are the same connection, not two).
+ * Returns null when the config does not validate (no identity to keep).
+ */
+function flashforgeFingerprint(config: Partial<KlipperConfig>): string | null {
+  const validated = validateFlashForgeConfig(config);
+  if (!validated.ok) return null;
+  return JSON.stringify([
+    "flashforge",
+    validated.config.baseUrl,
+    validated.config.serialNumber,
+    validated.config.checkCodeRef,
+    [...(validated.config.allowedHosts ?? [])].sort(),
+  ]);
+}
+
+/** Fingerprint of whatever transport `config` selects (kind-aware). */
+function transportFingerprint(config: Partial<KlipperConfig>): string | null {
+  const selection = selectTransport(config.transport);
+  if (!selection.ok) return null;
+  return selection.kind === "flashforge"
+    ? flashforgeFingerprint(config)
+    : connectionFingerprint(config);
 }
 
 export async function createKlipperWorker(
@@ -153,6 +192,7 @@ export async function createKlipperWorker(
   }
 
   const clientOverrides = options.clientOverrides ?? {};
+  const flashforgeClientOverrides = options.flashforgeClientOverrides ?? {};
 
   const handle: KlipperWorker = {
     client: null,
@@ -163,14 +203,37 @@ export async function createKlipperWorker(
       // like an absent config and degrade permissively.
       const config: Partial<KlipperConfig> =
         nextConfig && typeof nextConfig === "object" ? nextConfig : {};
-      // Fingerprint the PREVIOUS connection identity before overwriting the
-      // display config, so the unchanged-replay no-op below compares old vs
-      // new rather than new vs new.
+      // Fingerprint the PREVIOUS connection identity (kind-aware: a live
+      // flashforge client must be compared with the flashforge fingerprint,
+      // not the moonraker one) before overwriting the display config, so the
+      // unchanged-replay no-op below compares old vs new rather than new vs
+      // new.
       const prevFingerprint = handle.client
-        ? connectionFingerprint(handle.config)
+        ? transportFingerprint(handle.config)
         : null;
       handle.config = config as KlipperConfig;
 
+      // ── Transport selection ─────────────────────────────────────────────
+      // Absent/unset resolves to moonraker (legacy behavior). An UNKNOWN
+      // value is rejected fail-closed: stop any live client, keep the worker
+      // permissive-but-inert, and log a clear reason. Never a silent
+      // fallthrough to moonraker.
+      const selection = selectTransport(config.transport);
+      if (!selection.ok) {
+        if (handle.client) {
+          const old = handle.client;
+          handle.client = null;
+          old.stop();
+        }
+        ctx.logger.warn(
+          "paperclip-klipper rejected the transport config value — refusing to start any printer client; tool calls will return prerequisite_missing until this is fixed",
+          { pluginId: "platform.klipper", source, reason: selection.reason },
+        );
+        registerRpcSurface(ctx, { config: config as KlipperConfig, client: null });
+        return;
+      }
+
+      if (selection.kind === "moonraker") {
       const rawBaseUrl = config.moonrakerBaseUrl;
       if (!rawBaseUrl) {
         // Config applied with no baseUrl: degrade to permissive init. Stop any
@@ -291,6 +354,110 @@ export async function createKlipperWorker(
           });
         });
       }
+      return;
+      } // ── end moonraker branch ──────────────────────────────────────────
+
+      // ── FlashForge transport (Creator 5 LAN-only HTTP API) ─────────────
+      const ffValidated = validateFlashForgeConfig(config);
+      if (!ffValidated.ok) {
+        // Fail closed with a clear validation error at load: stop any live
+        // client, surface every missing/invalid field, and keep the worker
+        // permissive-but-inert. NEVER a silent fallthrough to moonraker.
+        if (handle.client) {
+          const old = handle.client;
+          handle.client = null;
+          old.stop();
+        }
+        ctx.logger.warn(
+          "paperclip-klipper rejected the flashforge transport config — refusing to start the FlashForge client; tool calls will return prerequisite_missing until the config is completed",
+          {
+            pluginId: "platform.klipper",
+            source,
+            reason: ffValidated.reason,
+            fields: ffValidated.fields,
+            host: ffValidated.host,
+            detail: describeFlashForgeConfigFailure(ffValidated),
+          },
+        );
+        registerRpcSurface(ctx, { config: config as KlipperConfig, client: null });
+        return;
+      }
+      const ff = ffValidated.config;
+      const fingerprint = flashforgeFingerprint(config);
+      if (handle.client && prevFingerprint === fingerprint) {
+        // Same connection identity — keep the live client (replay burst).
+        registerRpcSurface(ctx, { config: config as KlipperConfig, client: handle.client });
+        ctx.logger.debug("klipper.config_replay_unchanged", { pluginId: "platform.klipper", source });
+        return;
+      }
+
+      if (handle.client) {
+        const old = handle.client;
+        handle.client = null;
+        old.stop();
+        ctx.logger.info("klipper.connection_replaced", {
+          pluginId: "platform.klipper",
+          source,
+          transport: "flashforge",
+          flashforgeBaseUrl: ff.baseUrl,
+        });
+      }
+
+      const client = new FlashForgeClient({
+        baseUrl: ff.baseUrl,
+        serialNumber: ff.serialNumber,
+        checkCodeRef: ff.checkCodeRef,
+        http: ctx.http,
+        secrets: ctx.secrets,
+        logger: ctx.logger,
+        onStatus: (snapshot: MoonrakerStatusSnapshot) => {
+          try {
+            ctx.streams.emit(STREAM_CHANNEL, { type: "status", snapshot });
+          } catch (err) {
+            ctx.logger.debug("klipper.stream.emit_failed", {
+              channel: STREAM_CHANNEL,
+              error: String(err instanceof Error ? err.message : err),
+            });
+          }
+        },
+        onConnectionState: (state: ConnectionStateSnapshot) => {
+          try {
+            ctx.streams.emit(STREAM_CHANNEL, { type: "connection", state });
+          } catch (err) {
+            ctx.logger.debug("klipper.stream.emit_failed", {
+              channel: STREAM_CHANNEL,
+              error: String(err instanceof Error ? err.message : err),
+            });
+          }
+        },
+        ...flashforgeClientOverrides,
+      });
+      handle.client = client;
+
+      registerRpcSurface(ctx, { config: config as KlipperConfig, client });
+
+      ctx.logger.info(
+        "paperclip-klipper FlashForge transport config applied — status poll client ready",
+        {
+          transport: "flashforge",
+          flashforgeBaseUrl: ff.baseUrl,
+          hasCheckCodeRef: Boolean(ff.checkCodeRef),
+          auto_upload_artifacts: config.auto_upload_artifacts === true,
+          allow_agent_initiated_print: config.allow_agent_initiated_print === true,
+        },
+      );
+
+      if (autoStart) {
+        // Open the /detail poll loop in the background. An unreachable
+        // printer is a degraded state, not a setup failure; the poll loop
+        // surfaces reconnecting/failed and health fails closed.
+        client.start().catch((err) => {
+          ctx.logger.warn("flashforge.poll.initial_connect_failed", {
+            transport: "flashforge",
+            error: String(err instanceof Error ? err.message : err),
+          });
+        });
+      }
     },
   };
 
@@ -371,15 +538,31 @@ const plugin = definePlugin({
   },
 
   async onHealth() {
+    // Boot observability: distinguish "booted, config replay pending"
+    // from "operator configured no baseUrl" and from a live connection.
+    const details: Record<string, unknown> = {
+      configKnown: activeWorker?.configKnown ?? false,
+      clientActive: Boolean(activeWorker?.client),
+    };
+    // Transports that can probe reachability on demand (FlashForge) are
+    // health-checked FAIL-CLOSED: a fresh probe that cannot reach the
+    // printer reports `degraded`, never a stale "ok" from the poll cache.
+    // Moonraker keeps its historical liveness-only health report.
+    const client = activeWorker?.client;
+    if (client && typeof client.probeHealth === "function") {
+      const report = await client.probeHealth();
+      return {
+        status: report.reachable ? ("ok" as const) : ("degraded" as const),
+        message: report.reachable
+          ? `paperclip-klipper worker is running — ${report.message}`
+          : `paperclip-klipper degraded: ${report.message}`,
+        details: { ...details, ...report.details },
+      };
+    }
     return {
       status: "ok" as const,
       message: "paperclip-klipper worker is running",
-      details: {
-        // Boot observability: distinguish "booted, config replay pending"
-        // from "operator configured no baseUrl" and from a live connection.
-        configKnown: activeWorker?.configKnown ?? false,
-        clientActive: Boolean(activeWorker?.client),
-      },
+      details,
     };
   },
 });

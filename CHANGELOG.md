@@ -5,6 +5,45 @@ plugin follows semver against the host plugin API (PLA-526 keeps
 `package.json.version` and the manifest version in lockstep via the build
 `define`).
 
+## 0.2.0 — 2026-09-23
+
+### Added
+- **FlashForge printer transport.** New `transport` config key
+  (`"moonraker" | "flashforge"`) selects the printer API; unset keeps the
+  historical Moonraker behavior exactly. `transport: "flashforge"` drives
+  FlashForge-firmware printers (Creator 5 / Creator 5 Pro) through their
+  *Network > LAN Only* HTTP API: G-code upload (`POST /uploadGcode`), job and
+  printer status (`POST /detail`, polled every 10 s into the same dashboard
+  snapshot path), file listing, and operator-initiated print/job control.
+  Endpoint shapes derive from the community reference client
+  (GhostTypes/ff-5mp-api-py).
+- **Fail-closed config validation.** `transport: "flashforge"` requires
+  `flashforgeBaseUrl`, `flashforgeSerialNumber` (the Device ID) and
+  `flashforgeCheckCodeRef` (secret-ref for the check-code credential, resolved
+  per call and never logged). Missing or invalid config stops any live client
+  and surfaces a clear validation error — never a crash, never a silent
+  fallthrough to moonraker. Unknown `transport` values are rejected the same
+  way. The manifest schema enforces the enum; the static `required` list is
+  now empty because required keys are per-transport (a flashforge-only company
+  must not be forced to set `moonrakerBaseUrl`).
+- **Fail-closed health for the FlashForge transport.** `onHealth` probes the
+  printer with a fresh `/detail` request and reports `degraded` on refused /
+  timeout / 5xx / error-envelope outcomes. Moonraker health semantics are
+  unchanged.
+- **Outbound scope enforcement for the FlashForge host**, mirroring the
+  Moonraker allowlist pattern (`flashforgeAllowedHosts`, strict WHATWG
+  host-equality checks, default port 8898 applied when the URL omits one).
+
+### Security
+- The agent print gate (`allow_agent_initiated_print`) stays **default-deny**
+  for both transports. FlashForge uploads send `printNow: false`
+  unconditionally — no upload path can start a print, and
+  `auto_upload_artifacts` never weakens the print gate.
+- 33 new unit tests against an in-process mock FlashForge HTTP server
+  (no physical printer needed): upload wire shape + auth headers, snapshot
+  mapping, health fail-closed paths, print-gate refusals, and config
+  validation.
+
 ## 0.1.11 — 2026-09-16
 
 ### Fixed
