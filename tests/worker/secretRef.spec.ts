@@ -89,8 +89,30 @@ describe("isConfiguredSecretRef (fail-closed missing-field gate)", () => {
 });
 
 describe("canonicalSecretRefIdentity (config fingerprint identity)", () => {
-  it("keeps legacy strings verbatim (no churn for existing configs)", () => {
-    expect(canonicalSecretRefIdentity("flashforge-check-code")).toBe("flashforge-check-code");
+  it("prefixes legacy strings (`string:`) so string and object identities stay disjoint", () => {
+    expect(canonicalSecretRefIdentity("flashforge-check-code")).toBe(
+      "string:flashforge-check-code",
+    );
+  });
+
+  it("a legacy string that literally equals an object's canonical form is a DIFFERENT identity", () => {
+    const objectIdentity = canonicalSecretRefIdentity({ type: "secret_ref", secretId: UUID });
+    const lookalike = `secret_ref:${UUID}:latest`;
+    expect(canonicalSecretRefIdentity(lookalike)).not.toBe(objectIdentity);
+    expect(canonicalSecretRefIdentity(lookalike)).toBe(`string:${lookalike}`);
+  });
+
+  it("a legacy string that mimics the malformed branch is also distinct", () => {
+    const malformedIdentity = canonicalSecretRefIdentity({
+      type: "secret_ref",
+      secretId: "not-a-uuid",
+    });
+    expect(malformedIdentity.startsWith("secret_ref:malformed:")).toBe(true);
+    // The exact lookalike a string would need to alias the malformed branch.
+    const lookalike =
+      'secret_ref:malformed:{"secretId":"not-a-uuid","type":"secret_ref"}';
+    expect(canonicalSecretRefIdentity(lookalike)).not.toBe(malformedIdentity);
+    expect(canonicalSecretRefIdentity(lookalike)).toBe(`string:${lookalike}`);
   });
 
   it("is stable across object key order and trims", () => {
