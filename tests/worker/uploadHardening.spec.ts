@@ -96,6 +96,7 @@ describe("F1: worker-side filename re-validation (both transports share the hand
     registerRpcSurface(ctx, {
       config: { auto_upload_artifacts: true, allow_agent_initiated_print: true } as KlipperConfig,
       getClient: () => fakeClient as never,
+      camera: null,
     });
     const upload = registered.find((t) => t.name === "klipper.upload_gcode")!.handler;
     const start = registered.find((t) => t.name === "klipper.start_print")!.handler;
@@ -214,6 +215,7 @@ describe("F2: printer-controlled envelope message is capped at 1024 chars", () =
         allow_agent_initiated_print: true,
       } as KlipperConfig,
       getClient: () => client as never,
+      camera: null,
     });
     const start = registered.find((t) => t.name === "klipper.start_print")!.handler;
     const result = await start({ filename: "bracket.gcode" }, {} as ToolRunContext);

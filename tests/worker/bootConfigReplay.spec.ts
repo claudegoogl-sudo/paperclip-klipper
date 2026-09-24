@@ -112,7 +112,7 @@ describe("boot: setup makes no config read (poisoning-safe)", () => {
     const cfg = await harness.getData<{ configured: boolean; moonrakerBaseUrl: string | null }>(
       "config",
     );
-    expect(cfg).toEqual({ configured: false, moonrakerBaseUrl: null });
+    expect(cfg).toEqual({ configured: false, moonrakerBaseUrl: null, cameraConfigured: false });
   });
 });
 

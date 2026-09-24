@@ -106,7 +106,7 @@ describe("paperclip-klipper permissive init", () => {
       configured: boolean;
       moonrakerBaseUrl: string | null;
     }>("config");
-    expect(cfg).toEqual({ configured: false, moonrakerBaseUrl: null });
+    expect(cfg).toEqual({ configured: false, moonrakerBaseUrl: null, cameraConfigured: false });
   });
 
   it("status data key returns a safe snapshot (no crash) when unconfigured", async () => {

@@ -187,6 +187,7 @@ function setupGunzipHarness(opts: {
     config,
     getClient: () => fakeClient,
     maxInflatedGcodeBytes: opts.maxInflatedGcodeBytes,
+    camera: null,
   });
 
   const exec = (extraParams: Record<string, unknown> = {}) =>

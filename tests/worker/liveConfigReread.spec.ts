@@ -52,6 +52,7 @@ function setupHarness(initialConfig: Record<string, unknown>) {
   registerRpcSurface(harness.ctx, {
     config: initialConfig as never,
     getClient: () => fakeClient,
+    camera: null,
   });
 
   const startPrint = () =>

@@ -27,6 +27,8 @@ import {
   selectTransport,
   validateFlashForgeConfig,
 } from "./worker/transports/validateTransportConfig.js";
+import { CameraFeed } from "./worker/camera/CameraFeed.js";
+import { validateCameraBaseUrl } from "./worker/camera/validateCameraConfig.js";
 import type { PrinterTransport } from "./worker/transports/PrinterTransport.js";
 
 /**
@@ -122,6 +124,17 @@ export interface CreateKlipperWorkerOptions {
 export type KlipperConfigSource = "setup" | "configChanged" | "dispatch";
 
 export interface KlipperWorker {
+  /**
+   * Camera feed for the printer page's camera section, or `null` when the
+   * camera is not configured. Lifecycle is viewer-driven (open on first
+   * board action, self-close on idle) — see worker/camera/CameraFeed.ts.
+   */
+  camera: CameraFeed | null;
+  /**
+   * Connection-identity fingerprint of the live camera feed (null when no
+   * feed). Lets unchanged replays keep the feed instead of churning it.
+   */
+  cameraFingerprint: string | null;
   /**
    * Active printer transport (MoonrakerClient or FlashForgeClient), or
    * `null` when the worker is running without usable transport config (config
@@ -297,6 +310,14 @@ export async function createKlipperWorker(
     config: {} as KlipperConfig,
     configKnown: false,
     getCredentialPendingReason: () => credentialPendingReason,
+    /**
+     * Camera feed (single upstream MJPG connection, keep-latest buffer).
+     * Managed INDEPENDENTLY of the printer transport: a camera config
+     * problem degrades the camera section only and never takes the
+     * transport down (and vice versa). `null` = camera not configured.
+     */
+    camera: null,
+    cameraFingerprint: null,
     async applyConfig(nextConfig, source, autoStart = true) {
       // Defensive: a malformed replay must not crash the worker; treat it
       // like an absent config and degrade permissively.
@@ -311,6 +332,66 @@ export async function createKlipperWorker(
       // picked up at the next dispatch. Until that dispatch the transport
       // runs dormant/degraded (fail-closed idle).
       credentialCache = null;
+
+      // ── Camera feed (independent of transport selection) ─────────────
+      // Validated like the transport config (http(s), no userinfo, host
+      // allowlist defaulting to the FlashForge host) and additionally
+      // scoped to /?action=stream. A camera config problem degrades ONLY
+      // the camera section — the transport client is untouched.
+      {
+        const camRaw = config.flashforgeCameraBaseUrl;
+        const camFingerprint = JSON.stringify([
+          "camera",
+          camRaw ?? null,
+          [...(config.flashforgeCameraAllowedHosts ?? [])].sort(),
+        ]);
+        const prevCamFingerprint = handle.camera ? handle.cameraFingerprint : null;
+        if (camRaw === undefined || camRaw === null || camRaw === "") {
+          if (handle.camera) {
+            handle.camera.dispose();
+            handle.camera = null;
+            handle.cameraFingerprint = null;
+            ctx.logger.info("paperclip-klipper camera removed from config — camera section disabled", {
+              pluginId: "platform.klipper",
+              source,
+            });
+          }
+        } else if (handle.camera && prevCamFingerprint === camFingerprint) {
+          // Same camera identity — keep the feed (per-company replay burst).
+        } else {
+          const ffHost = (() => {
+            try {
+              return config.flashforgeBaseUrl ? new URL(config.flashforgeBaseUrl).host : null;
+            } catch {
+              return null;
+            }
+          })();
+          const validated = validateCameraBaseUrl(camRaw, config.flashforgeCameraAllowedHosts, ffHost);
+          if (!validated.ok) {
+            if (handle.camera) {
+              handle.camera.dispose();
+              handle.camera = null;
+              handle.cameraFingerprint = null;
+            }
+            ctx.logger.warn(
+              "paperclip-klipper rejected flashforgeCameraBaseUrl — camera section disabled; the transport is unaffected",
+              { pluginId: "platform.klipper", source, reason: validated.reason, host: validated.host },
+            );
+          } else {
+            if (handle.camera) handle.camera.dispose();
+            handle.camera = new CameraFeed({
+              baseUrl: validated.url,
+              logger: ctx.logger,
+            });
+            handle.cameraFingerprint = camFingerprint;
+            ctx.logger.info("paperclip-klipper camera feed configured — opens on first board viewer", {
+              pluginId: "platform.klipper",
+              source,
+              cameraHost: validated.host,
+            });
+          }
+        }
+      }
       // Fingerprint the PREVIOUS connection identity (kind-aware: a live
       // flashforge client must be compared with the flashforge fingerprint,
       // not the moonraker one) before overwriting the display config, so the
@@ -868,6 +949,7 @@ export async function createKlipperWorker(
       getClient: () => handle.client,
       getDegradedReason: () => credentialPendingReason,
       ensureCredential,
+      camera: handle.camera,
     };
   }
 

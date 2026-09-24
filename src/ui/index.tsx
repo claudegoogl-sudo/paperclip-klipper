@@ -27,6 +27,7 @@ import type {
   MoonrakerStatusSnapshot,
 } from "./../worker/MoonrakerClient.js";
 import { ActivePrint, ACTIVE_PRINT_STATES } from "./ActivePrint.js";
+import { CameraSection } from "./CameraSection.js";
 import { ConnectionBanner } from "./ConnectionBanner.js";
 import { FileList } from "./FileList.js";
 import { LastCompletedJob } from "./LastCompletedJob.js";
@@ -43,6 +44,8 @@ interface ClientStreamEvent {
 interface ConfigDataSnapshot {
   configured: boolean;
   moonrakerBaseUrl: string | null;
+  /** Camera section availability (validated flashforgeCameraBaseUrl). */
+  cameraConfigured?: boolean;
 }
 
 /**
@@ -144,6 +147,9 @@ export function Page(_props: PluginPageProps) {
       >
         {/* §1 */}
         <ConnectionBanner connection={connection} onReconnected={refreshStatus} />
+
+        {/* §1b — live camera view (pull-based; see CameraSection header) */}
+        <CameraSection configured={configData.data?.cameraConfigured} />
 
         {initialStatusLoading ? (
           <div

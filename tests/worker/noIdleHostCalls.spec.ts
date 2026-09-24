@@ -34,7 +34,8 @@
  *     material reaches the logs.
  */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { createRunCtxAwareHarness, type TestHarness } from "@paperclipai/plugin-sdk/testing";
+import { type TestHarness } from "@paperclipai/plugin-sdk/testing";
+import { createRunCtxAwareHarness } from "../helpers/runCtxAwareHarness.js";
 import manifest from "../../src/manifest.js";
 import plugin, { createKlipperWorker } from "../../src/worker.js";
 import { bootWithReplay } from "../helpers/replayBoot.js";
