@@ -14,13 +14,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createTestHarness } from "@paperclipai/plugin-sdk/testing";
 import manifest from "../src/manifest.js";
-import { bootWithReplay } from "./helpers/replayBoot.js";
+
 import {
   MoonrakerClient,
   MoonrakerOutboundScopeError,
   redactApiKey,
 } from "../src/worker/MoonrakerClient.js";
 import { MockMoonraker } from "./fixtures/moonraker/mockServer.js";
+import { bootWithReplay } from "./helpers/replayBoot.js";
 
 const SECRET_REF = "moonraker-api-key";
 // The harness resolves a secret ref to `resolved:<ref>` (see plugin-sdk
@@ -42,15 +43,45 @@ interface RecordedStreamEvent {
 }
 
 /**
- * Narrow `createKlipperWorker`'s `client: MoonrakerClient | null` return
- * (the null branch handles permissive init) for tests that
- * have configured `moonrakerBaseUrl` and therefore expect a real client.
+ * Build the MoonrakerClient under test DIRECTLY (no worker lifecycle).
+ * These are client-level specs; under the lazy in-dispatch credential
+ * contract the worker boots ref-bearing transports DORMANT (no resolved
+ * key until the first credentialed dispatch), so borrowing a credentialed
+ * client from the worker boot path no longer applies. The client is
+ * constructed with the resolved key here; the worker-level credential
+ * lifecycle (zero out-of-dispatch resolves, cache invalidation, degraded
+ * idle) has its own specs in worker/noIdleHostCalls.spec.ts.
  */
-function expectClient<T extends { client: unknown }>(worker: T): T & { client: NonNullable<T["client"]> } {
-  if (worker.client === null || worker.client === undefined) {
-    throw new Error("test setup: createKlipperWorker returned a null client");
-  }
-  return worker as T & { client: NonNullable<T["client"]> };
+const ARTIFACT_ID = "33333333-3333-4333-8333-333333333333";
+const GCODE = new Uint8Array([0x47, 0x31, 0x20, 0x58, 0x31, 0x30, 0x0a]); // "G1 X10\n"
+
+function artifactRunCtx() {
+  return {
+    artifacts: {
+      async fetch() {
+        return {
+          bytes: GCODE,
+          filename: "demo.gcode",
+          contentType: "application/octet-stream",
+          byteSize: GCODE.length,
+        };
+      },
+    },
+  };
+}
+
+function directClient(
+  harness: ReturnType<typeof createTestHarness>,
+  baseUrl: string,
+  overrides: Partial<ConstructorParameters<typeof MoonrakerClient>[0]> = {},
+): MoonrakerClient {
+  return new MoonrakerClient({
+    baseUrl,
+    apiKey: RESOLVED_KEY,
+    http: harness.ctx.http,
+    logger: harness.ctx.logger,
+    ...overrides,
+  });
 }
 
 function harnessWithStreams(config: Record<string, unknown>) {
@@ -113,7 +144,7 @@ describe("MoonrakerClient REST", () => {
       moonrakerBaseUrl: mock.baseUrl(),
       moonrakerApiKeyRef: SECRET_REF,
     });
-    const { client } = expectClient(await bootWithReplay(harness));
+    const client = directClient(harness, mock.baseUrl());
 
     const info = await client.getPrinterInfo();
     expect(info.state).toBe("ready");
@@ -154,23 +185,31 @@ describe("MoonrakerClient REST", () => {
   it("accepts an OBJECT-shaped api key ref and forwards the resolved key", async () => {
     // Current hosts bind config secrets as
     // { type: "secret_ref", secretId, version? } and reject string refs at
-    // resolution time, so the whole config→client→wire path must carry the
-    // object through verbatim.
+    // resolution time, so the whole config→dispatch→wire path must carry
+    // the object through verbatim. The ref-bearing transport boots DORMANT
+    // and the ref resolves INSIDE the first credentialed dispatch.
     const UUID = "690a5384-1234-4abc-8abc-000000000001";
     const resolveCalls: unknown[] = [];
-    const { harness } = harnessWithStreams({
+    const config = {
       moonrakerBaseUrl: mock.baseUrl(),
       moonrakerApiKeyRef: { type: "secret_ref", secretId: UUID },
-    });
+      auto_upload_artifacts: true,
+    };
+    const { harness } = harnessWithStreams(config);
     const origResolve = harness.ctx.secrets.resolve.bind(harness.ctx.secrets);
-    harness.ctx.secrets.resolve = (async (ref: string) => {
+    harness.ctx.secrets.resolve = (async (ref: unknown) => {
       resolveCalls.push(ref);
       return RESOLVED_KEY;
     }) as typeof harness.ctx.secrets.resolve;
 
-    const { client } = expectClient(await bootWithReplay(harness));
-    const info = await client.getPrinterInfo();
-    expect(info.state).toBe("ready");
+    const worker = await bootWithReplay(harness, { config, autoStart: true });
+    expect(worker.client).not.toBeNull();
+    const result = await harness.executeTool<{ data?: unknown; error?: string }>(
+      "klipper.upload_gcode",
+      { filename: "demo.gcode", artifactId: ARTIFACT_ID },
+      artifactRunCtx(),
+    );
+    expect(result.error).toBeUndefined();
 
     // The object reached the secrets client untouched.
     expect(resolveCalls).toEqual([{ type: "secret_ref", secretId: UUID }]);
@@ -185,7 +224,7 @@ describe("MoonrakerClient REST", () => {
       moonrakerBaseUrl: mock.baseUrl(),
       moonrakerApiKeyRef: SECRET_REF,
     });
-    const { client } = expectClient(await bootWithReplay(harness));
+    const client = directClient(harness, mock.baseUrl());
 
     const payload = Buffer.from("G28\nG1 X10 Y10\n");
     const result = await client.uploadGcode("part.gcode", payload);
@@ -246,11 +285,9 @@ describe("MoonrakerClient WebSocket", () => {
       moonrakerApiKeyRef: SECRET_REF,
     });
     const updates: number[] = [];
-    const { client } = expectClient(await bootWithReplay(harness, {
-      clientOverrides: {
-        onStatus: () => updates.push(Date.now()),
-      },
-    }));
+    const client = directClient(harness, mock.baseUrl(), {
+      onStatus: () => updates.push(Date.now()),
+    });
 
     await client.start();
     await waitFor(() => client.getConnectionState().state === "connected", 2000);
@@ -281,18 +318,16 @@ describe("MoonrakerClient WebSocket", () => {
       moonrakerBaseUrl: mock.baseUrl(),
       moonrakerApiKeyRef: SECRET_REF,
     });
-    const { client } = expectClient(await bootWithReplay(harness, {
-      clientOverrides: {
-        reconnect: {
-          initialDelayMs: 50,
-          maxDelayMs: 500,
-          multiplier: 2,
-          maxAttempts: 6,
-          jitter: 0, // deterministic
-        },
-        random: () => 0.5,
+    const client = directClient(harness, mock.baseUrl(), {
+      reconnect: {
+        initialDelayMs: 50,
+        maxDelayMs: 500,
+        multiplier: 2,
+        maxAttempts: 6,
+        jitter: 0, // deterministic
       },
-    }));
+      random: () => 0.5,
+    });
 
     await client.start();
     await waitFor(() => client.getConnectionState().state === "connected", 2000);
@@ -320,18 +355,16 @@ describe("MoonrakerClient WebSocket", () => {
       moonrakerBaseUrl: mock.baseUrl(),
       moonrakerApiKeyRef: SECRET_REF,
     });
-    const { client } = expectClient(await bootWithReplay(harness, {
-      clientOverrides: {
-        reconnect: {
-          initialDelayMs: 25,
-          maxDelayMs: 50,
-          multiplier: 1.5,
-          maxAttempts: 3,
-          jitter: 0,
-        },
-        random: () => 0.5,
+    const client = directClient(harness, mock.baseUrl(), {
+      reconnect: {
+        initialDelayMs: 25,
+        maxDelayMs: 50,
+        multiplier: 1.5,
+        maxAttempts: 3,
+        jitter: 0,
       },
-    }));
+      random: () => 0.5,
+    });
 
     await client.start();
     await waitFor(() => client.getConnectionState().state === "connected", 2000);
@@ -366,7 +399,12 @@ describe("MoonrakerClient unauthenticated mode", () => {
     const { harness } = harnessWithStreams({
       moonrakerBaseUrl: mock.baseUrl(),
     });
-    const { client } = expectClient(await bootWithReplay(harness));
+    const client = new MoonrakerClient({
+      baseUrl: mock.baseUrl(),
+      apiKey: null, // unauthenticated Moonraker
+      http: harness.ctx.http,
+      logger: harness.ctx.logger,
+    });
 
     await client.getPrinterInfo();
     // No X-Api-Key header was sent on any request.

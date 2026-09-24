@@ -12,12 +12,16 @@ import {
   type KlipperConfig,
 } from "./worker/registerRpcSurface.js";
 import { validateMoonrakerBaseUrl } from "./worker/validateMoonrakerBaseUrl.js";
+import type { RpcSurfaceOptions } from "./worker/registerRpcSurface.js";
 import {
   canonicalSecretRefIdentity,
   resolveSecretRef,
   type SecretRef,
 } from "./worker/secretRef.js";
-import { FlashForgeClient } from "./worker/transports/FlashForgeClient.js";
+import {
+  CREDENTIAL_PENDING_MESSAGE,
+  FlashForgeClient,
+} from "./worker/transports/FlashForgeClient.js";
 import {
   describeFlashForgeConfigFailure,
   selectTransport,
@@ -62,20 +66,30 @@ import type { PrinterTransport } from "./worker/transports/PrinterTransport.js";
  *   re-reading config per dispatch (fail-closed); those reads run INSIDE a
  *   dispatch, where single-in-flight attribution attributes them correctly.
  *
- * Credential semantics (resolve at config application only):
- *   For the same reason, `ctx.secrets.resolve` is NEVER called outside a
- *   config application. The status poll, WS reconnect loop, health probes,
- *   and UI data keys all run outside dispatches; a per-request/per-cycle
- *   resolve from any of them poisons the method the same way. Instead,
- *   `applyConfig` resolves the configured secret ref ONCE per config
- *   application — the `configChanged` RPC runs inside the host's scoped
- *   push, so that call is attributed and company-scoped — and hands the
- *   plaintext to the transport client, which holds it in memory only. The
- *   cache never outlives the config that produced it: every application
- *   (including unchanged-fingerprint replays) re-resolves and swaps the
- *   value in. A resolve failure is fail-closed: no client is built (or the
- *   live one is stopped), tools return `prerequisite_missing`, and the
- *   reason is logged without any credential material.
+ * Credential semantics (resolve lazily INSIDE the dispatch):
+ *   `ctx.secrets.resolve` is called ONLY inside a tool dispatch. The
+ *   host's `configChanged` push is NOT a reliable authorization context on
+ *   this SDK generation: rows are delivered per company back-to-back and
+ *   the plugin's apply runs async to the push, so an id-less resolve lands
+ *   with 0 or 2+ invocations in flight — single-in-flight attribution
+ *   finds no scope and the SDK gate denies it (observed live: EVERY
+ *   apply-time resolve during the activation replay failed with
+ *   InvocationScopeDeniedError, and a config re-save cannot fix it because
+ *   the save push rides the same path). The one authorization path this
+ *   worker class can rely on is in-dispatch single-in-flight attribution
+ *   with the executeTool scope carrying companyId+runId.
+ *
+ *   Therefore: `applyConfig` stores validated config + refs only (zero
+ *   worker→host calls) and converges ref-bearing transports DORMANT — no
+ *   WS, no poll; status/health report "credential not resolved yet". The
+ *   first tool dispatch that needs a credential resolves its ref
+ *   (`ensureCredential`), caches the plaintext in memory keyed to the
+ *   config fingerprint, injects it into the transport and starts it. The
+ *   cache is invalidated on EVERY config application (a rotated secret
+ *   lands at the next dispatch); the status poll and UI surfaces consume
+ *   the client-held value only and never resolve; the plaintext is never
+ *   logged. A resolve failure keeps the transport dormant (fail closed)
+ *   and the tool refuses with a clear reason.
  */
 
 /**
@@ -104,8 +118,8 @@ export interface CreateKlipperWorkerOptions {
   flashforgeClientOverrides?: Partial<FlashForgeClientOptions>;
 }
 
-/** Where a config snapshot came from — named in logs for boot observability. */
-export type KlipperConfigSource = "setup" | "configChanged";
+/** Where a config snapshot or convergence came from — named in logs. */
+export type KlipperConfigSource = "setup" | "configChanged" | "dispatch";
 
 export interface KlipperWorker {
   /**
@@ -125,6 +139,13 @@ export interface KlipperWorker {
    * no `moonrakerBaseUrl`.
    */
   configKnown: boolean;
+  /**
+   * Why the transport is not running yet ("credential not resolved yet —
+   * the transport starts on the first tool dispatch that needs it"), or
+   * `null` when nothing is pending. Surfaced by `onHealth` and the status
+   * surfaces so the fail-closed idle state is observable, not silent.
+   */
+  getCredentialPendingReason(): string | null;
   /**
    * Apply a config snapshot (from the host `configChanged` replay or an
    * operator save) and converge the client + RPC surface onto it.
@@ -213,10 +234,69 @@ export async function createKlipperWorker(
   const clientOverrides = options.clientOverrides ?? {};
   const flashforgeClientOverrides = options.flashforgeClientOverrides ?? {};
 
+  // ── Credential resolution state (lazy in-dispatch resolution) ──────────
+  // Resolved plaintext cache: held in memory only, keyed to the config
+  // fingerprint that produced it, invalidated on EVERY config application.
+  // Never logged, never persisted. The ONLY writer is `ensureCredential`
+  // (dispatch scope).
+  let credentialCache: { fingerprint: string; plaintext: string } | null = null;
+  /**
+   * Why the transport is not running yet, or `null` when nothing is
+   * pending. Non-null = "a credential ref is configured but unresolved";
+   * surfaced verbatim by the status data key, the status tool, and health.
+   */
+  let credentialPendingReason: string | null = null;
+  /** Whether the CURRENT client's transport loop was started by the worker. */
+  let transportStarted = false;
+
+  // Stream emissions shared by both transports (identical callback shape).
+  const transportStreamCallbacks = {
+    onStatus: (snapshot: MoonrakerStatusSnapshot) => {
+      try {
+        ctx.streams.emit(STREAM_CHANNEL, { type: "status", snapshot });
+      } catch (err) {
+        ctx.logger.debug("klipper.stream.emit_failed", {
+          channel: STREAM_CHANNEL,
+          error: String(err instanceof Error ? err.message : err),
+        });
+      }
+    },
+    onConnectionState: (state: ConnectionStateSnapshot) => {
+      try {
+        ctx.streams.emit(STREAM_CHANNEL, { type: "connection", state });
+      } catch (err) {
+        ctx.logger.debug("klipper.stream.emit_failed", {
+          channel: STREAM_CHANNEL,
+          error: String(err instanceof Error ? err.message : err),
+        });
+      }
+    },
+  };
+
+  /**
+   * Config-application invalidation for a credential-bearing transport.
+   * A STARTED transport is stopped and dropped — no live connection may
+   * outlive the credential resolution that authorized it. A dormant
+   * never-started client is KEPT (with its credential cleared) so the
+   * per-company boot replay burst converges without churning clients.
+   */
+  const invalidateTransportForApplication = (): void => {
+    const client = handle.client;
+    if (!client) return;
+    if (transportStarted) {
+      handle.client = null;
+      client.stop();
+    } else {
+      client.applyCredential(null);
+    }
+    transportStarted = false;
+  };
+
   const handle: KlipperWorker = {
     client: null,
     config: {} as KlipperConfig,
     configKnown: false,
+    getCredentialPendingReason: () => credentialPendingReason,
     async applyConfig(nextConfig, source, autoStart = true) {
       // Defensive: a malformed replay must not crash the worker; treat it
       // like an absent config and degrade permissively.
@@ -225,6 +305,12 @@ export async function createKlipperWorker(
       // Any config application ends the "booted unconfigured" state — this
       // is the only path config ever arrives by (no setup-time read).
       handle.configKnown = true;
+      // EVERY config application invalidates the in-dispatch credential
+      // cache: the resolved plaintext must never outlive the config that
+      // produced it, and a rotated secret on an unchanged ref must be
+      // picked up at the next dispatch. Until that dispatch the transport
+      // runs dormant/degraded (fail-closed idle).
+      credentialCache = null;
       // Fingerprint the PREVIOUS connection identity (kind-aware: a live
       // flashforge client must be compared with the flashforge fingerprint,
       // not the moonraker one) before overwriting the display config, so the
@@ -251,7 +337,7 @@ export async function createKlipperWorker(
           "paperclip-klipper rejected the transport config value — refusing to start any printer client; tool calls will return prerequisite_missing until this is fixed",
           { pluginId: "platform.klipper", source, reason: selection.reason },
         );
-        registerRpcSurface(ctx, { config: config as KlipperConfig, client: null });
+        registerRpcSurface(ctx, surfaceOptions(config as KlipperConfig));
         return;
       }
 
@@ -264,21 +350,19 @@ export async function createKlipperWorker(
           handle.client = null;
           old.stop();
         }
-        registerRpcSurface(ctx, { config: config as KlipperConfig, client: null });
+        transportStarted = false;
+        credentialPendingReason = null;
+        registerRpcSurface(ctx, surfaceOptions(config as KlipperConfig));
       };
 
       if (selection.kind === "moonraker") {
       const rawBaseUrl = config.moonrakerBaseUrl;
 
-      // ── Credential resolution (config-apply scope ONLY) ─────────────────
-      // `ctx.secrets.resolve` is called here and nowhere else in the worker
-      // lifecycle: applyConfig runs inside the host's scoped config push
-      // (`configChanged` RPC), where worker→host calls carry the applying
-      // company's context. A resolve from the status poll, WS reconnect,
-      // UI data keys, or actions would be id-less with nothing in flight
-      // and permanently poison the method (single-in-flight attribution —
-      // see the boot-semantics note at the top of this file). The resolved
-      // plaintext is handed to the client in memory and never logged.
+      // NO apply-time `ctx.secrets.resolve` anywhere in this branch — see
+      // the credential-semantics note at the top of this file. A
+      // ref-bearing config converges to a DORMANT transport here;
+      // `ensureCredential` resolves the ref lazily inside the first
+      // dispatch that needs it (dispatch attribution authorizes the call).
       if (!rawBaseUrl) {
         // Config applied with no baseUrl: degrade to permissive init. Stop any
         // live client so a stale transport can never outlive its config.
@@ -296,7 +380,7 @@ export async function createKlipperWorker(
             { pluginId: "platform.klipper", source },
           );
         }
-        registerRpcSurface(ctx, { config: config as KlipperConfig, client: null });
+        registerRpcSurface(ctx, surfaceOptions(config as KlipperConfig));
         return;
       }
 
@@ -318,105 +402,101 @@ export async function createKlipperWorker(
           "paperclip-klipper rejected moonrakerBaseUrl — refusing to start the Moonraker client until this is fixed; tool calls will return prerequisite_missing",
           { pluginId: "platform.klipper", source, reason: validated.reason, host: validated.host },
         );
-        registerRpcSurface(ctx, { config: config as KlipperConfig, client: null });
+        registerRpcSurface(ctx, surfaceOptions(config as KlipperConfig));
         return;
       }
       const baseUrl = validated.url.toString();
 
-      let moonrakerApiKey: string | null = null;
-      if (config.moonrakerApiKeyRef !== undefined && config.moonrakerApiKeyRef !== null) {
-        try {
-          moonrakerApiKey = await resolveSecretRef(ctx.secrets, config.moonrakerApiKeyRef);
-        } catch (err) {
-          // Fail closed: no transport runs without its credential, and a
-          // live client whose secret just stopped resolving is stopped too.
-          ctx.logger.warn(
-            "paperclip-klipper could not resolve the Moonraker API key ref — refusing to run the transport without a credential (fail closed); fix the secret and save the config again",
-            { pluginId: "platform.klipper", source, reason: err instanceof Error ? err.message : String(err) },
-          );
-          stopAndDegrade();
+      const hasApiKeyRef =
+        config.moonrakerApiKeyRef !== undefined && config.moonrakerApiKeyRef !== null;
+      const fingerprint = connectionFingerprint(config);
+
+      if (!hasApiKeyRef) {
+        // Unauthenticated Moonraker (no ref configured): legacy convergence
+        // semantics. An identical replay burst keeps the live client (no
+        // churn); a new connection identity replaces it. No credential is
+        // involved, so the transport starts immediately (autoStart) and
+        // nothing is pending.
+        if (handle.client && prevFingerprint === fingerprint) {
+          handle.client.applyCredential(null);
+          registerRpcSurface(ctx, surfaceOptions(config as KlipperConfig));
+          ctx.logger.debug("klipper.config_replay_unchanged", { pluginId: "platform.klipper", source });
           return;
         }
-      }
-
-      const fingerprint = connectionFingerprint(config);
-      if (handle.client && prevFingerprint === fingerprint) {
-        // Same connection identity (per-company replay burst at boot, or an
-        // operator save that only touched gate flags) — keep the live client,
-        // but ALWAYS refresh the credential: every config application
-        // re-resolves, so the cached value never outlives the config that
-        // produced it (a rotated secret on an unchanged ref is picked up at
-        // the next save/replay). Re-register so the `config` data key
-        // reflects the latest snapshot; re-registration replaces by key.
-        handle.client.applyCredential(moonrakerApiKey);
-        registerRpcSurface(ctx, { config: config as KlipperConfig, client: handle.client });
-        ctx.logger.debug("klipper.config_replay_unchanged", { pluginId: "platform.klipper", source });
+        credentialPendingReason = null;
+        if (handle.client) {
+          const old = handle.client;
+          handle.client = null;
+          old.stop();
+          transportStarted = false;
+          ctx.logger.info("klipper.connection_replaced", {
+            pluginId: "platform.klipper",
+            source,
+            moonrakerBaseUrl: baseUrl,
+          });
+        }
+        const client = new MoonrakerClient({
+          baseUrl,
+          apiKey: null,
+          http: ctx.http,
+          logger: ctx.logger,
+          ...transportStreamCallbacks,
+          ...clientOverrides,
+        });
+        handle.client = client;
+        registerRpcSurface(ctx, surfaceOptions(config as KlipperConfig));
+        ctx.logger.info(
+          source === "setup"
+            ? "paperclip-klipper worker setup"
+            : "paperclip-klipper config applied via host replay — Moonraker client started",
+          {
+            moonrakerBaseUrl: baseUrl,
+            hasApiKeyRef: false,
+            auto_upload_artifacts: config.auto_upload_artifacts === true,
+            allow_agent_initiated_print: config.allow_agent_initiated_print === true,
+          },
+        );
+        if (autoStart) {
+          // Open the WS connection in the background. A missing printer is a
+          // degraded state, not a setup failure; the reconnect loop drives retries.
+          transportStarted = true;
+          void client.start().catch((err) => {
+            ctx.logger.warn("klipper.ws.initial_connect_failed", {
+              error: String(err instanceof Error ? err.message : err),
+            });
+          });
+        }
         return;
       }
 
-      if (handle.client) {
-        const old = handle.client;
-        handle.client = null;
-        old.stop();
-        ctx.logger.info("klipper.connection_replaced", {
-          pluginId: "platform.klipper",
-          source,
-          moonrakerBaseUrl: baseUrl,
+      // Credential-bearing config: converge to a DORMANT transport. The
+      // application already invalidated the resolution cache; a started
+      // transport was stopped and dropped above, a dormant matching client
+      // is reused (no churn across the boot replay burst). The WS opens
+      // only after `ensureCredential` resolves the ref INSIDE a dispatch.
+      invalidateTransportForApplication();
+      credentialPendingReason = CREDENTIAL_PENDING_MESSAGE;
+      if (!(handle.client && prevFingerprint === fingerprint)) {
+        handle.client = new MoonrakerClient({
+          baseUrl,
+          apiKey: null,
+          http: ctx.http,
+          logger: ctx.logger,
+          ...transportStreamCallbacks,
+          ...clientOverrides,
         });
       }
-
-      const client = new MoonrakerClient({
-        baseUrl,
-        apiKey: moonrakerApiKey,
-        http: ctx.http,
-        logger: ctx.logger,
-        onStatus: (snapshot: MoonrakerStatusSnapshot) => {
-          try {
-            ctx.streams.emit(STREAM_CHANNEL, { type: "status", snapshot });
-          } catch (err) {
-            ctx.logger.debug("klipper.stream.emit_failed", {
-              channel: STREAM_CHANNEL,
-              error: String(err instanceof Error ? err.message : err),
-            });
-          }
-        },
-        onConnectionState: (state: ConnectionStateSnapshot) => {
-          try {
-            ctx.streams.emit(STREAM_CHANNEL, { type: "connection", state });
-          } catch (err) {
-            ctx.logger.debug("klipper.stream.emit_failed", {
-              channel: STREAM_CHANNEL,
-              error: String(err instanceof Error ? err.message : err),
-            });
-          }
-        },
-        ...clientOverrides,
-      });
-      handle.client = client;
-
-      registerRpcSurface(ctx, { config: config as KlipperConfig, client });
-
+      transportStarted = false;
+      registerRpcSurface(ctx, surfaceOptions(config as KlipperConfig));
       ctx.logger.info(
-        source === "setup"
-          ? "paperclip-klipper worker setup"
-          : "paperclip-klipper config applied via host replay — Moonraker client started",
+        "paperclip-klipper config applied — Moonraker transport dormant until the first dispatch resolves the API key ref (fail-closed idle)",
         {
           moonrakerBaseUrl: baseUrl,
-          hasApiKeyRef: Boolean(config.moonrakerApiKeyRef),
+          clientReused: Boolean(handle.client && prevFingerprint === fingerprint),
           auto_upload_artifacts: config.auto_upload_artifacts === true,
           allow_agent_initiated_print: config.allow_agent_initiated_print === true,
         },
       );
-
-      if (autoStart) {
-        // Open the WS connection in the background. A missing printer is a
-        // degraded state, not a setup failure; the reconnect loop drives retries.
-        client.start().catch((err) => {
-          ctx.logger.warn("klipper.ws.initial_connect_failed", {
-            error: String(err instanceof Error ? err.message : err),
-          });
-        });
-      }
       return;
       } // ── end moonraker branch ──────────────────────────────────────────
 
@@ -442,113 +522,267 @@ export async function createKlipperWorker(
             detail: describeFlashForgeConfigFailure(ffValidated),
           },
         );
-        registerRpcSurface(ctx, { config: config as KlipperConfig, client: null });
+        registerRpcSurface(ctx, surfaceOptions(config as KlipperConfig));
         return;
       }
       const ff = ffValidated.config;
 
-      // ── Credential resolution (config-apply scope ONLY) ─────────────────
-      // Resolve the check-code ref ONCE per config application. The
-      // status poll previously resolved it per cycle — every ~10s, almost
-      // always with no dispatch in flight — which permanently poisoned
-      // `secrets.resolve` for the worker (single-in-flight attribution)
-      // and took the transport down with `flashforge.poll.failed`. The
-      // poll, health probes, and UI data keys now read the value resolved
-      // HERE, inside the host's scoped push; the plaintext is held in the
-      // client's memory only and never logged.
-      let checkCode: string;
-      try {
-        checkCode = await resolveSecretRef(ctx.secrets, ff.checkCodeRef);
-      } catch (err) {
-        // Fail closed: no transport runs without its credential, and a
-        // live client whose secret just stopped resolving is stopped too.
-        ctx.logger.warn(
-          "paperclip-klipper could not resolve the flashforge check-code ref — refusing to run the transport without a credential (fail closed); fix the secret and save the config again",
-          { pluginId: "platform.klipper", source, reason: err instanceof Error ? err.message : String(err) },
-        );
-        stopAndDegrade();
-        return;
-      }
-
+      // NO apply-time `ctx.secrets.resolve` — see the credential-semantics
+      // note at the top of this file. The check-code ref resolves lazily
+      // INSIDE the first dispatch that needs it; here the transport simply
+      // converges DORMANT (no /detail poll, status/health report the
+      // pending reason until then).
+      invalidateTransportForApplication();
+      credentialPendingReason = CREDENTIAL_PENDING_MESSAGE;
       const fingerprint = flashforgeFingerprint(config);
-      if (handle.client && prevFingerprint === fingerprint) {
-        // Same connection identity — keep the live client (replay burst),
-        // still refreshing the credential (see the moonraker branch note:
-        // the cache never outlives the config that produced it).
-        handle.client.applyCredential(checkCode);
-        registerRpcSurface(ctx, { config: config as KlipperConfig, client: handle.client });
-        ctx.logger.debug("klipper.config_replay_unchanged", { pluginId: "platform.klipper", source });
-        return;
-      }
-
-      if (handle.client) {
-        const old = handle.client;
-        handle.client = null;
-        old.stop();
-        ctx.logger.info("klipper.connection_replaced", {
-          pluginId: "platform.klipper",
-          source,
-          transport: "flashforge",
-          flashforgeBaseUrl: ff.baseUrl,
+      if (!(handle.client && prevFingerprint === fingerprint)) {
+        const client = new FlashForgeClient({
+          baseUrl: ff.baseUrl,
+          serialNumber: ff.serialNumber,
+          checkCode: null,
+          http: ctx.http,
+          logger: ctx.logger,
+          ...transportStreamCallbacks,
+          ...flashforgeClientOverrides,
         });
+        handle.client = client;
       }
-
-      const client = new FlashForgeClient({
-        baseUrl: ff.baseUrl,
-        serialNumber: ff.serialNumber,
-        checkCode,
-        http: ctx.http,
-        logger: ctx.logger,
-        onStatus: (snapshot: MoonrakerStatusSnapshot) => {
-          try {
-            ctx.streams.emit(STREAM_CHANNEL, { type: "status", snapshot });
-          } catch (err) {
-            ctx.logger.debug("klipper.stream.emit_failed", {
-              channel: STREAM_CHANNEL,
-              error: String(err instanceof Error ? err.message : err),
-            });
-          }
-        },
-        onConnectionState: (state: ConnectionStateSnapshot) => {
-          try {
-            ctx.streams.emit(STREAM_CHANNEL, { type: "connection", state });
-          } catch (err) {
-            ctx.logger.debug("klipper.stream.emit_failed", {
-              channel: STREAM_CHANNEL,
-              error: String(err instanceof Error ? err.message : err),
-            });
-          }
-        },
-        ...flashforgeClientOverrides,
-      });
-      handle.client = client;
-
-      registerRpcSurface(ctx, { config: config as KlipperConfig, client });
-
+      transportStarted = false;
+      registerRpcSurface(ctx, surfaceOptions(config as KlipperConfig));
       ctx.logger.info(
-        "paperclip-klipper FlashForge transport config applied — status poll client ready",
+        "paperclip-klipper FlashForge transport config applied — dormant until the first dispatch resolves the check-code ref (fail-closed idle)",
         {
           transport: "flashforge",
           flashforgeBaseUrl: ff.baseUrl,
-          hasCheckCodeRef: Boolean(ff.checkCodeRef),
+          clientReused: Boolean(handle.client && prevFingerprint === fingerprint),
           auto_upload_artifacts: config.auto_upload_artifacts === true,
           allow_agent_initiated_print: config.allow_agent_initiated_print === true,
         },
       );
+      // No autoStart branch: the /detail poll loop starts when
+      // `applyCredential()` receives the in-dispatch-resolved credential.
+    },
+  };
 
-      if (autoStart) {
-        // Open the /detail poll loop in the background. An unreachable
-        // printer is a degraded state, not a setup failure; the poll loop
-        // surfaces reconnecting/failed and health fails closed.
-        client.start().catch((err) => {
-          ctx.logger.warn("flashforge.poll.initial_connect_failed", {
-            transport: "flashforge",
+  // ── Lazy in-dispatch credential resolution ──────────────────────────────
+  type FlashForgeValidated = Extract<
+    ReturnType<typeof validateFlashForgeConfig>,
+    { ok: true }
+  >["config"];
+
+  /**
+   * Resolve the configured credential ref INSIDE a tool dispatch and bring
+   * the transport up. Dispatch attribution (the executeTool scope carries
+   * companyId+runId) is the one reliable authorization path for
+   * `ctx.secrets.resolve` on this worker class — a resolve from config
+   * apply, the status poll, WS reconnects, or UI surfaces is id-less
+   * outside a dispatch and would be denied by single-in-flight
+   * attribution.
+   *
+   * Cache semantics: the plaintext is held in memory keyed to the LIVE
+   * config fingerprint and invalidated by every config application, so a
+   * rotated secret lands at the next dispatch. Never logged, never
+   * persisted. A resolve failure keeps the transport dormant (fail closed)
+   * and returns a reason that names no credential material.
+   */
+  async function ensureCredential(
+    liveConfig: Partial<KlipperConfig>,
+    method: string,
+  ): Promise<{ ok: true } | { ok: false; reason: string }> {
+    const selection = selectTransport(liveConfig.transport);
+    if (!selection.ok) {
+      return {
+        ok: false,
+        reason: `the transport config is invalid (${selection.reason}) — fix the plugin config and retry`,
+      };
+    }
+    const fingerprint = transportFingerprint(liveConfig);
+    if (fingerprint === null) {
+      return {
+        ok: false,
+        reason: "the transport config is incomplete — fix the plugin config and retry",
+      };
+    }
+
+    // Unauthenticated Moonraker (no ref configured): nothing to resolve.
+    // The transport started at config apply; this start is a safety net for
+    // a client that has not been started yet.
+    if (
+      selection.kind === "moonraker" &&
+      !(
+        liveConfig.moonrakerApiKeyRef !== undefined &&
+        liveConfig.moonrakerApiKeyRef !== null
+      )
+    ) {
+      credentialPendingReason = null;
+      if (handle.client && !transportStarted) {
+        transportStarted = true;
+        void handle.client.start().catch((err) => {
+          ctx.logger.warn("klipper.ws.initial_connect_failed", {
             error: String(err instanceof Error ? err.message : err),
           });
         });
       }
-    },
-  };
+      return { ok: true };
+    }
+
+    // Fast path: already resolved for THIS exact config — the transport
+    // holds the plaintext; just make sure its loop is running.
+    if (
+      credentialCache !== null &&
+      credentialCache.fingerprint === fingerprint &&
+      handle.client
+    ) {
+      credentialPendingReason = null;
+      if (!transportStarted) {
+        transportStarted = true;
+        if (handle.client.kind === "moonraker") {
+          void handle.client.start().catch((err) => {
+            ctx.logger.warn("klipper.ws.initial_connect_failed", {
+              error: String(err instanceof Error ? err.message : err),
+            });
+          });
+        }
+        // flashforge: the applyCredential(code) that cached the value
+        // already (re)started the poll loop.
+      }
+      return { ok: true };
+    }
+
+    // Resolve IN-DISPATCH. Every code path below this line runs with a
+    // dispatch in flight — that is what makes the call authorized.
+    let ref: SecretRef;
+    let flashforgeConfig: FlashForgeValidated | null = null;
+    let moonrakerBaseUrl: string | null = null;
+    if (selection.kind === "flashforge") {
+      const validated = validateFlashForgeConfig(liveConfig);
+      if (!validated.ok) {
+        return {
+          ok: false,
+          reason: `the flashforge transport config is invalid (${validated.reason}) — fix the plugin config and retry`,
+        };
+      }
+      flashforgeConfig = validated.config;
+      ref = validated.config.checkCodeRef;
+    } else {
+      if (!liveConfig.moonrakerBaseUrl) {
+        return {
+          ok: false,
+          reason: "moonrakerBaseUrl is not set — fix the plugin config and retry",
+        };
+      }
+      const validated = validateMoonrakerBaseUrl(
+        liveConfig.moonrakerBaseUrl,
+        liveConfig.moonrakerAllowedHosts,
+      );
+      if (!validated.ok) {
+        return {
+          ok: false,
+          reason: `the moonraker transport config is invalid (${validated.reason}) — fix the plugin config and retry`,
+        };
+      }
+      moonrakerBaseUrl = validated.url.toString();
+      ref = liveConfig.moonrakerApiKeyRef as SecretRef;
+    }
+
+    let plaintext: string;
+    try {
+      plaintext = await resolveSecretRef(ctx.secrets, ref);
+    } catch (err) {
+      // Fail closed: the transport stays dormant; the reason carries no
+      // credential material.
+      const detail = err instanceof Error ? err.message : String(err);
+      credentialPendingReason = `credential not resolved yet — the configured secret ref failed to resolve on dispatch (${detail})`;
+      ctx.logger.warn("klipper.credential_dispatch_resolve_failed", {
+        pluginId: "platform.klipper",
+        transport: selection.kind,
+        method,
+        reason: detail,
+      });
+      return {
+        ok: false,
+        reason:
+          "credential not resolved yet — the configured secret ref could not be resolved (see worker logs); fix the secret and retry the dispatch",
+      };
+    }
+    credentialCache = { fingerprint, plaintext };
+
+    // Converge the transport onto the LIVE config with the credential:
+    // reuse the dormant client when its connection identity matches the
+    // live config, otherwise rebuild from the validated live config (the
+    // dispatching company's config is authoritative at dispatch time).
+    const reusable =
+      handle.client !== null &&
+      handle.client.kind === selection.kind &&
+      transportFingerprint(handle.config) === fingerprint;
+    if (!reusable) {
+      if (handle.client) {
+        const old = handle.client;
+        handle.client = null;
+        old.stop();
+      }
+      transportStarted = false;
+      handle.client =
+        selection.kind === "flashforge" && flashforgeConfig !== null
+          ? new FlashForgeClient({
+              baseUrl: flashforgeConfig.baseUrl,
+              serialNumber: flashforgeConfig.serialNumber,
+              checkCode: plaintext,
+              http: ctx.http,
+              logger: ctx.logger,
+              ...transportStreamCallbacks,
+              ...flashforgeClientOverrides,
+            })
+          : new MoonrakerClient({
+              baseUrl: moonrakerBaseUrl as string,
+              apiKey: plaintext,
+              http: ctx.http,
+              logger: ctx.logger,
+              ...transportStreamCallbacks,
+              ...clientOverrides,
+            });
+    } else {
+      // `reusable` guarantees the client exists (TS cannot narrow through
+      // the closure, so this stays optional-chained).
+      handle.client?.applyCredential(plaintext);
+    }
+    const active = handle.client;
+    credentialPendingReason = null;
+    if (!transportStarted && active) {
+      transportStarted = true;
+      if (!(selection.kind === "flashforge" && reusable)) {
+        // flashforge: applyCredential(code) already (re)started the poll
+        // loop; a second start() here would double-fire the first poll.
+        void active.start().catch((err) => {
+          ctx.logger.warn("klipper.transport.initial_connect_failed", {
+            transport: selection.kind,
+            error: String(err instanceof Error ? err.message : err),
+          });
+        });
+      }
+    }
+    ctx.logger.info("klipper.credential_resolved_in_dispatch", {
+      pluginId: "platform.klipper",
+      transport: selection.kind,
+      method,
+    });
+    return { ok: true };
+  }
+
+  /**
+   * Options for the RPC surface registration. Handlers read the CURRENT
+   * client through the `getClient` thunk (an in-dispatch convergence can
+   * replace the client object mid-flight) and the credential state through
+   * `getDegradedReason`, so a registration never pins a stale snapshot.
+   */
+  function surfaceOptions(config: KlipperConfig): RpcSurfaceOptions {
+    return {
+      config,
+      getClient: () => handle.client,
+      getDegradedReason: () => credentialPendingReason,
+      ensureCredential,
+    };
+  }
 
   // Subscribe once per worker lifetime (NOT per config application) so the
   // per-company replay burst at boot cannot stack duplicate handlers.
@@ -565,7 +799,7 @@ export async function createKlipperWorker(
   // Register the permissive surface so tools/data/actions exist and return
   // `prerequisite_missing`; `onConfigChanged` applies the host replay.
   handle.configKnown = false;
-  registerRpcSurface(ctx, { config: {} as KlipperConfig, client: null });
+  registerRpcSurface(ctx, surfaceOptions({} as KlipperConfig));
   ctx.logger.info(
     "paperclip-klipper booted without a config read (by design: setup makes no worker→host calls); connection stays down until the host config replay or an operator save lands",
     { pluginId: "platform.klipper" },
@@ -625,6 +859,17 @@ const plugin = definePlugin({
       configKnown: activeWorker?.configKnown ?? false,
       clientActive: Boolean(activeWorker?.client),
     };
+    // Fail-closed idle: a ref-bearing transport that no dispatch has
+    // credentialed yet reports degraded with the pending reason — never a
+    // stale "ok", never a probe against a credential-less transport.
+    const pending = activeWorker?.getCredentialPendingReason?.();
+    if (pending) {
+      return {
+        status: "degraded" as const,
+        message: `paperclip-klipper degraded: ${pending}`,
+        details: { ...details, credentialPending: true },
+      };
+    }
     // Transports that can probe reachability on demand (FlashForge) are
     // health-checked FAIL-CLOSED: a fresh probe that cannot reach the
     // printer reports `degraded`, never a stale "ok" from the poll cache.

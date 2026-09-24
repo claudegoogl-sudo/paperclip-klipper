@@ -39,7 +39,7 @@ Config keys (all three required when the transport is selected):
 | --- | --- | --- |
 | `flashforgeBaseUrl` | URL | e.g. `http://192.168.1.50:8898`. Port `8898` is applied when omitted; URLs embedding credentials (userinfo) are rejected — the check code belongs in the secret-ref. All FlashForge traffic is scoped to this host (`flashforgeAllowedHosts` mirrors the moonraker allowlist). |
 | `flashforgeSerialNumber` | string | The Device ID shown in the printer's *Network > LAN Only* settings. An identifier, not a credential. |
-| `flashforgeCheckCodeRef` | secret-ref | The per-printer check code (the LAN-mode credential). Resolved by the worker once per config application (boot replay or operator save); held in worker memory only — never stored or logged. |
+| `flashforgeCheckCodeRef` | secret-ref | The per-printer check code (the LAN-mode credential). Resolved by the worker INSIDE the first tool dispatch that needs it; held in worker memory only — never stored or logged. Before that first dispatch the transport is dormant and status/health report "credential not resolved yet". |
 
 #### Secret-reference shapes (both ref keys)
 
@@ -61,21 +61,34 @@ Config keys (all three required when the transport is selected):
   per-tenant config-overrides route answers 422 for them), so new setups
   should always use the object shape.
 
-Either way the plaintext value is resolved by the worker **once per config
-application** (the boot replay or an operator save — the host's scoped config
-push) and held in worker memory for the transport's lifetime; it is never
-stored, logged, or written to state, and the cache is refreshed at every
-config application, so a rotated secret takes effect at the next config save
-or worker restart. A missing or unresolvable ref refuses the transport at
-load (fail closed — no silent fallback).
+Either way the plaintext value is resolved by the worker **inside the first
+tool dispatch that needs it** (`klipper.upload_gcode` / `klipper.start_print`)
+and held in worker memory, keyed to the config fingerprint that produced it;
+it is never stored, logged, or written to state. Every config application
+(boot replay or operator save) invalidates the cache, so a rotated secret
+takes effect at the next dispatch. A ref that cannot be resolved fails the
+dispatch with a clear "credential not resolved yet" reason and the transport
+stays dormant (fail closed — no silent fallback, no unauthenticated request).
 
-> Why not resolve per request? Worker→host RPCs that run with no dispatch in
-> flight cannot be attributed to a tenant, and the host permanently denies a
-> method after seeing one — a per-request resolve from the status poll or a
-> WebSocket reconnect would poison `secrets.resolve` for the worker's whole
-> lifetime. Resolving inside the scoped config push (and re-reading config
-> inside dispatches, where the invocation is attributed) keeps every
-> worker→host call on an attributed path.
+**Fail-closed idle.** Until the first credentialed dispatch, a ref-bearing
+transport stays DORMANT: no WebSocket, no status poll, no request leaves the
+process. The status data key, the `klipper.get_printer_status` tool, and the
+health report all say `credential not resolved yet` during that window — an
+observable degraded state, not a misleading gate error. Background
+resolution (UI actions, the status poll, WS reconnects) is deliberately
+unsupported on this SDK generation; resolving there is exactly what the
+attribution rules forbid (see below).
+
+> Why not resolve at config-apply or per request? Worker→host RPCs that run
+> with no (or with several concurrent) invocations in flight cannot be
+> attributed to a tenant, and the host permanently denies a method after
+> seeing an unattributable one. The activation config replay delivers rows
+> back-to-back while the plugin's apply runs async to the push, so an
+> apply-time resolve lands unattributed and is denied — observed live, on
+> every row, during plugin activation. The ONE reliably attributed context
+> for this worker class is an in-flight tool dispatch, so the credential
+> resolves there; config re-reads for the opt-in gates ride the same
+> attributed path.
 
 Endpoint shapes follow the printer's LAN-only HTTP API (`POST /detail`,
 `/gcodeList`, `/uploadGcode`, `/printGcode`, `/control`): JSON endpoints carry
@@ -135,12 +148,16 @@ This plugin treats that denial as **config unknown, not boot failure**:
   the wait (`waiting for the host config replay`).
 - `onConfigChanged` (the host replay and every operator config save) applies
   the snapshot in-process and starts/stops the active transport's client
-  (Moonraker WebSocket or FlashForge poll) without a worker restart.
+  (Moonraker WebSocket or FlashForge poll) without a worker restart. The
+  application itself makes ZERO worker→host calls (no `config.get`, no
+  `secrets.resolve`) and converges ref-bearing transports DORMANT.
   Application is idempotent by connection identity
-  (transport + baseUrl + allowlist + credential ref), so
-  the per-company replay burst at boot converges on one client; gate-flag-only
-  changes never rebuild the transport; an absent or invalid `moonrakerBaseUrl`
-  degrades back to permissive init instead of crashing the worker.
+  (transport + baseUrl + allowlist + credential ref), so the per-company
+  replay burst at boot converges on one dormant client; an unauthenticated
+  Moonraker (no ref) starts immediately as before; an absent or invalid
+  `moonrakerBaseUrl` degrades back to permissive init instead of crashing
+  the worker. Every application invalidates the credential cache, so a
+  rotated secret lands at the next credentialed dispatch.
 - `onHealth` reports `configKnown` / `clientActive` so a replay-pending boot is
   visible in the plugin health dashboard.
 
