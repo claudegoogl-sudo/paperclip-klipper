@@ -80,6 +80,7 @@ describe("manifest ↔ worker tool contract", () => {
     config,
     // Cast: registration path never dereferences the client; see comment above.
     getClient: () => buildStubClient() as never,
+    camera: null,
   });
 
   const manifestToolNames = new Set(manifest.tools?.map((t) => t.name) ?? []);

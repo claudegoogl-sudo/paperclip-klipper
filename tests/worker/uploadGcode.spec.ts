@@ -22,7 +22,7 @@
  */
 import { gzipSync } from "node:zlib";
 import { describe, expect, it } from "vitest";
-import { createTestHarness } from "@paperclipai/plugin-sdk/testing";
+import { createRunCtxAwareHarness } from "../helpers/runCtxAwareHarness.js";
 import { MoonrakerClient } from "../../src/worker/MoonrakerClient.js";
 import { registerRpcSurface } from "../../src/worker/registerRpcSurface.js";
 import manifest from "../../src/manifest.js";
@@ -178,7 +178,7 @@ function setupGunzipHarness(opts: {
     moonrakerBaseUrl: "http://printer.lan:7125",
     auto_upload_artifacts: true,
   };
-  const harness = createTestHarness({
+  const harness = createRunCtxAwareHarness({
     manifest,
     capabilities: [...GUNZIP_CAPABILITIES],
     config,
@@ -187,6 +187,7 @@ function setupGunzipHarness(opts: {
     config,
     getClient: () => fakeClient,
     maxInflatedGcodeBytes: opts.maxInflatedGcodeBytes,
+    camera: null,
   });
 
   const exec = (extraParams: Record<string, unknown> = {}) =>
@@ -195,6 +196,9 @@ function setupGunzipHarness(opts: {
       { filename: "demo.gcode", artifactId: GUNZIP_ARTIFACT_ID, ...extraParams },
       {
         artifacts: {
+          async create() {
+            throw new Error("artifacts.create is not used by this plugin");
+          },
           async fetch(id: string) {
             expect(id).toBe(GUNZIP_ARTIFACT_ID);
             return {

@@ -132,6 +132,64 @@ files; starting a print stays an operator action):
   `print_stats.state` values (`ready`→`standby`, `printing`, `pause`→`paused`,
   `completed`→`complete`, …).
 
+### Live camera section (Creator 5)
+
+The printer page gains a **camera section** when `flashforgeCameraBaseUrl` is
+set (e.g. `http://192.168.1.50:8080`, the printer's MJPG-Streamer endpoint):
+
+- **Pull delivery.** Frames are fetched by the page from the worker over the
+  authenticated actions bridge (`camera_open` / `camera_next` /
+  `camera_retry`, ~2 fps) — not pushed over SSE. This host generation drops
+  worker stream emissions made outside a dispatch, so the actions bridge is
+  the only reliable authenticated surface.
+- **Board-only.** The printer's camera endpoint authenticates nothing, so
+  the worker is the trust boundary: `camera_open` / `camera_next` /
+  `camera_retry` refuse agent keys outright (`camera_close` is safe for any
+  actor). Frames render on the page and go nowhere else — never to agent
+  tools, data keys, or logs.
+- **One upstream, keep-latest.** The worker holds a single MJPG connection
+  (the printer's camera is single-viewer) and a one-frame buffer: a slow
+  viewer re-reads an older frame, frames in between are dropped. Memory is
+  capped per feed (one frame + one parse buffer).
+- **Hostile-stream fail-closed bounds.** Any frame over 512 KB or a
+  SOI-less prefix over 1 MB aborts the upstream immediately and counts
+  toward reconnect backoff.
+- **Idle self-release.** The feed opens when the section becomes visible,
+  stays warm while it is polled, and closes itself after 20 s without
+  viewer activity (tab hidden also closes it) — freeing the printer's
+  single-viewer slot for everyone else.
+- **Reconnect discipline.** Upstream failures back off exponentially
+  (1 s base, 30 s cap, jittered) and go terminally `failed` after 6
+  consecutive failures; the page then offers an explicit **Retry camera**
+  button (`camera_retry`). A stale-frame banner (frame older than 2.5 s)
+  replaces the live image rather than ever presenting a frozen frame as
+  live.
+- **URL scoping.** `flashforgeCameraBaseUrl` validates like the transports
+  (http(s)-only, no userinfo, host allowlist defaulting to the FlashForge
+  host — `flashforgeCameraAllowedHosts` overrides) and is additionally
+  pinned to exactly `/?action=stream`; the scope is re-checked at connect
+  time. Omitting the key disables the camera section; the transports run
+  unchanged.
+
+### Actions and actor gating (conditions C4/C5)
+
+The actions bridge authenticates board users AND agent API keys, and the
+worker gates by actor type:
+
+- **Board users keep tap-to-consent** — pressing a button on the page is
+  the consent signal. All actions work for board users regardless of the
+  agent flags.
+- **Agent keys are gated on the same live-config flags the tools use**,
+  re-read per dispatch and failing closed on read errors:
+  `start_print` / `pause_print` / `resume_print` / `cancel_print` require
+  `allow_agent_initiated_print: true`; `delete_file` and the new
+  `upload_gcode` action require `auto_upload_artifacts: true`.
+- **`upload_gcode` action** backs the page's file picker and shares the
+  tool's entire policy pipeline as code (same `uploadGcodeCore`): filename
+  and path backstops, the gunzip bomb guard, and the transport upload.
+  The inline base64 payload is capped at 16 MB encoded (12 MB decoded)
+  before any decode allocation.
+
 ## Boot-time config (host replay semantics)
 
 The Paperclip host spawns plugin workers with an **empty bootstrap config** and
@@ -190,10 +248,12 @@ This repo vendors packed tarballs under `.paperclip-sdk/` (~300 KB total) and
 intentional so `pnpm install` works from a fresh clone without needing access
 to the upstream Paperclip checkout.
 
-Snapshot source: `@paperclipai/plugin-sdk@2026.428.1-fork.5` and
-`@paperclipai/shared@2026.428.1-fork.5`. Once these SDKs are published to npm,
-switch the `devDependencies` to the registry versions and delete
-`.paperclip-sdk/`.
+Snapshot source: `@paperclipai/plugin-sdk@2026.916.1` and
+`@paperclipai/shared@2026.916.1`, packed from the published npm artifacts
+(`npm pack <pkg>@<version>` inside `.paperclip-sdk/`). The snapshot is
+refreshed when a plugin needs an SDK capability the vendored copy predates
+(e.g. actor-context delivery to action handlers); keep the tarballs pinned to
+exact versions so installs stay byte-reproducible.
 
 ## Install Into a Running Paperclip Server (alternative)
 

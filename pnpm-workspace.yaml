@@ -8,8 +8,8 @@ packages:
 onlyBuiltDependencies:
   - esbuild
 
-# Force fork-pinned `@paperclipai/shared` to the bundled tarball. The transitive
-# dependency comes from `@paperclipai/plugin-sdk` (also fork-pinned via tarball),
-# which references a fork-only version that does not exist on the public registry.
+# Pin `@paperclipai/shared` to the same vendored tarball as
+# `@paperclipai/plugin-sdk` (its transitive dependency), so installs resolve
+# byte-identically from `.paperclip-sdk/` without relying on registry state.
 overrides:
-  '@paperclipai/shared': 'file:.paperclip-sdk/paperclipai-shared-2026.428.1-fork.9.tgz'
+  '@paperclipai/shared': 'file:.paperclip-sdk/paperclipai-shared-2026.924.1-fork51.1.tgz'

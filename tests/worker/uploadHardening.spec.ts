@@ -54,6 +54,11 @@ function buildStubCtx(registered: RegisteredTool[]): PluginContext {
     // the tests exercise the filename backstop, not the gate refusal.
     config: {
       get: async () => ({ auto_upload_artifacts: true, allow_agent_initiated_print: true }),
+      // fork51 PluginConfigClient types the fork-only background read; this
+      // worker never calls it (config reaches the worker via the replay).
+      getForServiceScope: async (): Promise<Record<string, unknown>> => {
+        throw new Error("config.getForServiceScope is not used by this plugin");
+      },
     } as PluginContext["config"],
     logger: {
       debug: noop,
@@ -96,6 +101,7 @@ describe("F1: worker-side filename re-validation (both transports share the hand
     registerRpcSurface(ctx, {
       config: { auto_upload_artifacts: true, allow_agent_initiated_print: true } as KlipperConfig,
       getClient: () => fakeClient as never,
+      camera: null,
     });
     const upload = registered.find((t) => t.name === "klipper.upload_gcode")!.handler;
     const start = registered.find((t) => t.name === "klipper.start_print")!.handler;
@@ -214,6 +220,7 @@ describe("F2: printer-controlled envelope message is capped at 1024 chars", () =
         allow_agent_initiated_print: true,
       } as KlipperConfig,
       getClient: () => client as never,
+      camera: null,
     });
     const start = registered.find((t) => t.name === "klipper.start_print")!.handler;
     const result = await start({ filename: "bracket.gcode" }, {} as ToolRunContext);

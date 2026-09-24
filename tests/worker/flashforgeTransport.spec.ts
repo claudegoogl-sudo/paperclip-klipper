@@ -25,7 +25,7 @@ async function waitFor(
     await new Promise((r) => setTimeout(r, stepMs));
   }
 }
-import { createTestHarness } from "@paperclipai/plugin-sdk/testing";
+import { createRunCtxAwareHarness } from "../helpers/runCtxAwareHarness.js";
 import manifest from "../../src/manifest.js";
 import plugin, { createKlipperWorker } from "../../src/worker.js";
 import { bootWithReplay } from "../helpers/replayBoot.js";
@@ -55,6 +55,11 @@ const GCODE = new Uint8Array([0x47, 0x31, 0x20, 0x58, 0x31, 0x30, 0x0a]); // "G1
 function artifactCtx() {
   return {
     artifacts: {
+      // fork51 ToolRunContextArtifactsClient types both verbs; only fetch
+      // is ever exercised on this path.
+      async create() {
+        throw new Error("artifacts.create is not used by this plugin");
+      },
       async fetch() {
         return {
           bytes: GCODE,
@@ -94,7 +99,7 @@ describe("worker — flashforge transport happy paths (mock printer)", () => {
   });
 
   async function makeWorker(extraConfig: Record<string, unknown> = {}) {
-    const harness = createTestHarness({
+    const harness = createRunCtxAwareHarness({
       manifest,
       capabilities: [...CAPABILITIES],
       config: ffConfig(mock.baseUrl(), extraConfig),
@@ -195,7 +200,7 @@ describe("worker — flashforge transport happy paths (mock printer)", () => {
   });
 
   it("AC3: onHealth reports ok when reachable and degraded when unreachable (fail closed)", async () => {
-    const harness = createTestHarness({
+    const harness = createRunCtxAwareHarness({
       manifest,
       capabilities: [...CAPABILITIES],
       config: {},
@@ -322,7 +327,7 @@ describe("worker — fail-closed transport config validation (AC5)", () => {
   });
 
   function makeHarnessWithConfig(config: Record<string, unknown>) {
-    return createTestHarness({
+    return createRunCtxAwareHarness({
       manifest,
       capabilities: [...CAPABILITIES],
       config,
@@ -479,7 +484,7 @@ describe("worker — flashforge transport with object checkCodeRef (mock printer
 
   it("upload authenticates with the resolved check code from the object ref", async () => {
     const resolveCalls: unknown[] = [];
-    const harness = createTestHarness({
+    const harness = createRunCtxAwareHarness({
       manifest,
       capabilities: [...CAPABILITIES],
       config: {
@@ -558,7 +563,7 @@ describe("worker — flashforge transport with padded string checkCodeRef (trim 
 
   it("upload resolves the TRIMMED string ref and authenticates against the printer", async () => {
     const resolveCalls: unknown[] = [];
-    const harness = createTestHarness({
+    const harness = createRunCtxAwareHarness({
       manifest,
       capabilities: [...CAPABILITIES],
       config: {
