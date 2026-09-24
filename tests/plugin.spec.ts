@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { createTestHarness } from "@paperclipai/plugin-sdk/testing";
+import { createRunCtxAwareHarness } from "./helpers/runCtxAwareHarness.js";
 import manifest from "../src/manifest.js";
 import plugin from "../src/worker.js";
 import { bootWithReplay } from "./helpers/replayBoot.js";
@@ -81,7 +81,7 @@ describe("paperclip-klipper config gates", () => {
   const config = { moonrakerBaseUrl: "http://127.0.0.1:1" };
 
   it("upload_gcode refuses when auto_upload_artifacts is unset", async () => {
-    const harness = createTestHarness({ manifest, capabilities: [...CAPABILITIES], config });
+    const harness = createRunCtxAwareHarness({ manifest, capabilities: [...CAPABILITIES], config });
     await bootWithReplay(harness);
     const result = await harness.executeTool<{ error?: string }>(
       "klipper.upload_gcode",
@@ -94,7 +94,7 @@ describe("paperclip-klipper config gates", () => {
   });
 
   it("start_print refuses when allow_agent_initiated_print is unset", async () => {
-    const harness = createTestHarness({ manifest, capabilities: [...CAPABILITIES], config });
+    const harness = createRunCtxAwareHarness({ manifest, capabilities: [...CAPABILITIES], config });
     await bootWithReplay(harness);
     const result = await harness.executeTool<{ error?: string }>(
       "klipper.start_print",
@@ -107,7 +107,7 @@ describe("paperclip-klipper config gates", () => {
     // Guards the regression where a stray real-WS open caused vitest to
     // hang. setup() must skip auto-start when VITEST=true.
     expect(process.env.VITEST).toBe("true");
-    const harness = createTestHarness({ manifest, capabilities: [...CAPABILITIES], config });
+    const harness = createRunCtxAwareHarness({ manifest, capabilities: [...CAPABILITIES], config });
     await plugin.definition.setup(harness.ctx);
     // Nothing to wait on; if a real WS open had been attempted, the
     // process would log a connection failure to a non-listening port.
@@ -128,7 +128,7 @@ describe("paperclip-klipper RPC surface", () => {
   });
 
   it("get_printer_status tool returns a structured snapshot", async () => {
-    const harness = createTestHarness({
+    const harness = createRunCtxAwareHarness({
       manifest,
       capabilities: [...CAPABILITIES],
       config: { moonrakerBaseUrl: mock.baseUrl() },
@@ -142,7 +142,7 @@ describe("paperclip-klipper RPC surface", () => {
   });
 
   it("refresh action fetches /printer/info via the mock", async () => {
-    const harness = createTestHarness({
+    const harness = createRunCtxAwareHarness({
       manifest,
       capabilities: [...CAPABILITIES],
       config: { moonrakerBaseUrl: mock.baseUrl() },
@@ -156,7 +156,7 @@ describe("paperclip-klipper RPC surface", () => {
   });
 
   it("upload_gcode succeeds when the gate is open", async () => {
-    const harness = createTestHarness({
+    const harness = createRunCtxAwareHarness({
       manifest,
       capabilities: [...CAPABILITIES],
       config: { moonrakerBaseUrl: mock.baseUrl(), auto_upload_artifacts: true },
@@ -175,6 +175,9 @@ describe("paperclip-klipper RPC surface", () => {
       },
       {
         artifacts: {
+          async create() {
+            throw new Error("artifacts.create is not used by this plugin");
+          },
           async fetch(id) {
             expect(id).toBe(artifactId);
             return {
@@ -192,7 +195,7 @@ describe("paperclip-klipper RPC surface", () => {
   });
 
   it("start_print succeeds when the gate is open", async () => {
-    const harness = createTestHarness({
+    const harness = createRunCtxAwareHarness({
       manifest,
       capabilities: [...CAPABILITIES],
       config: { moonrakerBaseUrl: mock.baseUrl(), allow_agent_initiated_print: true },
@@ -207,7 +210,7 @@ describe("paperclip-klipper RPC surface", () => {
   });
 
   it("status data key reflects connection state", async () => {
-    const harness = createTestHarness({
+    const harness = createRunCtxAwareHarness({
       manifest,
       capabilities: [...CAPABILITIES],
       config: { moonrakerBaseUrl: mock.baseUrl() },
@@ -236,7 +239,7 @@ describe("paperclip-klipper UI actions", () => {
   });
 
   it("start_print action triggers POST /printer/print/start", async () => {
-    const harness = createTestHarness({
+    const harness = createRunCtxAwareHarness({
       manifest,
       capabilities: [...CAPABILITIES],
       config: { moonrakerBaseUrl: mock.baseUrl() },
@@ -256,7 +259,7 @@ describe("paperclip-klipper UI actions", () => {
 
   it("start_print action is NOT gated on allow_agent_initiated_print", async () => {
     // The agent tool with the same name IS gated; the UI action must not be.
-    const harness = createTestHarness({
+    const harness = createRunCtxAwareHarness({
       manifest,
       capabilities: [...CAPABILITIES],
       config: {
@@ -273,7 +276,7 @@ describe("paperclip-klipper UI actions", () => {
   });
 
   it("start_print action surfaces HTTP failure as a thrown error", async () => {
-    const harness = createTestHarness({
+    const harness = createRunCtxAwareHarness({
       manifest,
       capabilities: [...CAPABILITIES],
       config: { moonrakerBaseUrl: mock.baseUrl() },
@@ -286,7 +289,7 @@ describe("paperclip-klipper UI actions", () => {
   });
 
   it("delete_file action triggers DELETE /server/files/<root>/<path>", async () => {
-    const harness = createTestHarness({
+    const harness = createRunCtxAwareHarness({
       manifest,
       capabilities: [...CAPABILITIES],
       config: { moonrakerBaseUrl: mock.baseUrl() },
@@ -306,7 +309,7 @@ describe("paperclip-klipper UI actions", () => {
   });
 
   it("delete_file action rejects when `path` is missing", async () => {
-    const harness = createTestHarness({
+    const harness = createRunCtxAwareHarness({
       manifest,
       capabilities: [...CAPABILITIES],
       config: { moonrakerBaseUrl: mock.baseUrl() },
@@ -316,7 +319,7 @@ describe("paperclip-klipper UI actions", () => {
   });
 
   it("resume_print action triggers POST /printer/print/resume", async () => {
-    const harness = createTestHarness({
+    const harness = createRunCtxAwareHarness({
       manifest,
       capabilities: [...CAPABILITIES],
       config: { moonrakerBaseUrl: mock.baseUrl() },
@@ -334,7 +337,7 @@ describe("paperclip-klipper UI actions", () => {
   });
 
   it("resume_print action surfaces HTTP failure as a thrown error", async () => {
-    const harness = createTestHarness({
+    const harness = createRunCtxAwareHarness({
       manifest,
       capabilities: [...CAPABILITIES],
       config: { moonrakerBaseUrl: mock.baseUrl() },

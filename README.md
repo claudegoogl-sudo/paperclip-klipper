@@ -190,10 +190,12 @@ This repo vendors packed tarballs under `.paperclip-sdk/` (~300 KB total) and
 intentional so `pnpm install` works from a fresh clone without needing access
 to the upstream Paperclip checkout.
 
-Snapshot source: `@paperclipai/plugin-sdk@2026.428.1-fork.5` and
-`@paperclipai/shared@2026.428.1-fork.5`. Once these SDKs are published to npm,
-switch the `devDependencies` to the registry versions and delete
-`.paperclip-sdk/`.
+Snapshot source: `@paperclipai/plugin-sdk@2026.916.1` and
+`@paperclipai/shared@2026.916.1`, packed from the published npm artifacts
+(`npm pack <pkg>@<version>` inside `.paperclip-sdk/`). The snapshot is
+refreshed when a plugin needs an SDK capability the vendored copy predates
+(e.g. actor-context delivery to action handlers); keep the tarballs pinned to
+exact versions so installs stay byte-reproducible.
 
 ## Install Into a Running Paperclip Server (alternative)
 

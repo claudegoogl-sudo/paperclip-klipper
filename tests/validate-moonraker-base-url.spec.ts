@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createTestHarness } from "@paperclipai/plugin-sdk/testing";
+import { createRunCtxAwareHarness } from "./helpers/runCtxAwareHarness.js";
 import manifest from "../src/manifest.js";
 import { bootWithReplay } from "./helpers/replayBoot.js";
 import { validateMoonrakerBaseUrl } from "../src/worker/validateMoonrakerBaseUrl.js";
@@ -72,7 +72,7 @@ describe("validateMoonrakerBaseUrl (unit)", () => {
 
 describe("createKlipperWorker fails closed on an invalid moonrakerBaseUrl", () => {
   it("falls back to permissive-init (client: null) for a non-http(s) scheme, and warns with the host only", async () => {
-    const harness = createTestHarness({
+    const harness = createRunCtxAwareHarness({
       manifest,
       capabilities: [...CAPABILITIES],
       config: { moonrakerBaseUrl: "javascript:alert(1)", moonrakerApiKeyRef: "secret-key" },
@@ -89,7 +89,7 @@ describe("createKlipperWorker fails closed on an invalid moonrakerBaseUrl", () =
   });
 
   it("falls back to permissive-init when the configured host is not on the operator allowlist", async () => {
-    const harness = createTestHarness({
+    const harness = createRunCtxAwareHarness({
       manifest,
       capabilities: [...CAPABILITIES],
       config: {
@@ -108,7 +108,7 @@ describe("createKlipperWorker fails closed on an invalid moonrakerBaseUrl", () =
   });
 
   it("does not throw / crash worker setup on an unparseable moonrakerBaseUrl", async () => {
-    const harness = createTestHarness({
+    const harness = createRunCtxAwareHarness({
       manifest,
       capabilities: [...CAPABILITIES],
       config: { moonrakerBaseUrl: "not a url" },
@@ -117,7 +117,7 @@ describe("createKlipperWorker fails closed on an invalid moonrakerBaseUrl", () =
   });
 
   it("still connects when moonrakerBaseUrl is valid and no allowlist is set (no behavior change for existing single-host configs)", async () => {
-    const harness = createTestHarness({
+    const harness = createRunCtxAwareHarness({
       manifest,
       capabilities: [...CAPABILITIES],
       config: { moonrakerBaseUrl: "http://127.0.0.1:1" },

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createTestHarness } from "@paperclipai/plugin-sdk/testing";
+import { createRunCtxAwareHarness } from "./helpers/runCtxAwareHarness.js";
 import manifest from "../src/manifest.js";
 import { createKlipperWorker } from "../src/worker.js";
 import { bootWithReplay } from "./helpers/replayBoot.js";
@@ -28,7 +28,7 @@ const CAPABILITIES = [
 
 describe("paperclip-klipper permissive init", () => {
   it("createKlipperWorker resolves without throwing when moonrakerBaseUrl is absent", async () => {
-    const harness = createTestHarness({
+    const harness = createRunCtxAwareHarness({
       manifest,
       capabilities: [...CAPABILITIES],
       config: {},
@@ -47,7 +47,7 @@ describe("paperclip-klipper permissive init", () => {
   });
 
   it("get_printer_status tool returns prerequisite_missing when unconfigured", async () => {
-    const harness = createTestHarness({
+    const harness = createRunCtxAwareHarness({
       manifest,
       capabilities: [...CAPABILITIES],
       config: {},
@@ -67,7 +67,7 @@ describe("paperclip-klipper permissive init", () => {
     // order and starts fetching the artifact before checking the client,
     // this test will fail loudly (the stubbed fetch would never be called
     // anyway, but the prereq-missing branch must remain first-line).
-    const harness = createTestHarness({
+    const harness = createRunCtxAwareHarness({
       manifest,
       capabilities: [...CAPABILITIES],
       config: { auto_upload_artifacts: true },
@@ -83,7 +83,7 @@ describe("paperclip-klipper permissive init", () => {
   });
 
   it("start_print tool returns prerequisite_missing when unconfigured", async () => {
-    const harness = createTestHarness({
+    const harness = createRunCtxAwareHarness({
       manifest,
       capabilities: [...CAPABILITIES],
       config: { allow_agent_initiated_print: true },
@@ -96,7 +96,7 @@ describe("paperclip-klipper permissive init", () => {
   });
 
   it("config data key reports unconfigured state for the page slot", async () => {
-    const harness = createTestHarness({
+    const harness = createRunCtxAwareHarness({
       manifest,
       capabilities: [...CAPABILITIES],
       config: {},
@@ -110,7 +110,7 @@ describe("paperclip-klipper permissive init", () => {
   });
 
   it("status data key returns a safe snapshot (no crash) when unconfigured", async () => {
-    const harness = createTestHarness({
+    const harness = createRunCtxAwareHarness({
       manifest,
       capabilities: [...CAPABILITIES],
       config: {},
@@ -123,7 +123,7 @@ describe("paperclip-klipper permissive init", () => {
   });
 
   it("files data key returns an empty list when unconfigured", async () => {
-    const harness = createTestHarness({
+    const harness = createRunCtxAwareHarness({
       manifest,
       capabilities: [...CAPABILITIES],
       config: {},
@@ -134,7 +134,7 @@ describe("paperclip-klipper permissive init", () => {
   });
 
   it("refresh action throws prerequisite_missing when unconfigured", async () => {
-    const harness = createTestHarness({
+    const harness = createRunCtxAwareHarness({
       manifest,
       capabilities: [...CAPABILITIES],
       config: {},
@@ -148,7 +148,7 @@ describe("paperclip-klipper permissive init", () => {
   it("config data key reports configured=true when moonrakerBaseUrl is set", async () => {
     // Happy-path counterpart so a future regression that breaks the
     // configured branch is caught by this same file.
-    const harness = createTestHarness({
+    const harness = createRunCtxAwareHarness({
       manifest,
       capabilities: [...CAPABILITIES],
       config: { moonrakerBaseUrl: "http://127.0.0.1:1" },

@@ -34,7 +34,7 @@
  *     material reaches the logs.
  */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { createTestHarness, type TestHarness } from "@paperclipai/plugin-sdk/testing";
+import { createRunCtxAwareHarness, type TestHarness } from "@paperclipai/plugin-sdk/testing";
 import manifest from "../../src/manifest.js";
 import plugin, { createKlipperWorker } from "../../src/worker.js";
 import { bootWithReplay } from "../helpers/replayBoot.js";
@@ -124,7 +124,7 @@ function flashforgeConfig(baseUrl: string, extra: Record<string, unknown> = {}) 
 
 describe("boot: zero worker→host calls at spawn", () => {
   it("setup() calls neither ctx.config.get nor ctx.secrets.resolve", async () => {
-    const harness = createTestHarness({
+    const harness = createRunCtxAwareHarness({
       manifest,
       capabilities: [...CAPABILITIES],
       config: {
@@ -155,7 +155,7 @@ describe("apply window: config application makes ZERO host calls (AC1)", () => {
 
   it("a ref-bearing apply resolves NOTHING and converges the transport dormant", async () => {
     const config = flashforgeConfig(mock.baseUrl(), { auto_upload_artifacts: true });
-    const harness = createTestHarness({ manifest, capabilities: [...CAPABILITIES], config });
+    const harness = createRunCtxAwareHarness({ manifest, capabilities: [...CAPABILITIES], config });
     const calls = countHostCalls(harness);
     const worker = await bootWithReplay(harness, { config });
 
@@ -170,7 +170,7 @@ describe("apply window: config application makes ZERO host calls (AC1)", () => {
 
   it("an overlapping multi-row replay and an apply that outlives the push make ZERO host calls", async () => {
     const config = flashforgeConfig(mock.baseUrl(), { auto_upload_artifacts: true });
-    const harness = createTestHarness({ manifest, capabilities: [...CAPABILITIES], config });
+    const harness = createRunCtxAwareHarness({ manifest, capabilities: [...CAPABILITIES], config });
     const calls = countHostCalls(harness);
     const worker = await createKlipperWorker(harness.ctx, { autoStart: false });
 
@@ -188,7 +188,7 @@ describe("apply window: config application makes ZERO host calls (AC1)", () => {
     await mock.start();
     try {
       const config = { moonrakerBaseUrl: mock.baseUrl() };
-      const harness = createTestHarness({ manifest, capabilities: [...CAPABILITIES], config });
+      const harness = createRunCtxAwareHarness({ manifest, capabilities: [...CAPABILITIES], config });
       const calls = countHostCalls(harness);
       const worker = await bootWithReplay(harness, { config, autoStart: true });
       expect(calls.configGets).toHaveLength(0);
@@ -214,7 +214,7 @@ describe("fail-closed idle: degraded status with the pending reason (AC3)", () =
 
   it("status surfaces report degraded BEFORE any dispatch; no crash loop, no gate error", async () => {
     const config = flashforgeConfig(mock.baseUrl());
-    const harness = createTestHarness({ manifest, capabilities: [...CAPABILITIES], config });
+    const harness = createRunCtxAwareHarness({ manifest, capabilities: [...CAPABILITIES], config });
     countHostCalls(harness);
     // Drive the production plugin path so health is reachable: setup (no
     // config read) + the host replay hook (dormant apply).
@@ -270,7 +270,7 @@ describe("dispatch: in-dispatch resolve starts the transport (AC2)", () => {
       auto_upload_artifacts: true,
       ...extra,
     });
-    const harness = createTestHarness({ manifest, capabilities: [...CAPABILITIES], config });
+    const harness = createRunCtxAwareHarness({ manifest, capabilities: [...CAPABILITIES], config });
     const calls = countHostCalls(harness);
     const worker = await bootWithReplay(harness, {
       config,
@@ -363,7 +363,7 @@ describe("cache lifecycle: invalidation + rotation + reconnect (AC4)", () => {
     const rotated = "rotated-check-code";
     let current = CHECK_CODE;
     const config = flashforgeConfig(mock.baseUrl(), { allow_agent_initiated_print: true });
-    const harness = createTestHarness({ manifest, capabilities: [...CAPABILITIES], config });
+    const harness = createRunCtxAwareHarness({ manifest, capabilities: [...CAPABILITIES], config });
     const calls = countHostCalls(harness);
     harness.ctx.secrets.resolve = (async (ref: unknown) => {
       calls.secretResolves.push(ref); // keep counting through the fake
@@ -409,7 +409,7 @@ describe("cache lifecycle: invalidation + rotation + reconnect (AC4)", () => {
 
   it("an unchanged-fingerprint replay burst keeps ONE dormant client (no churn)", async () => {
     const config = flashforgeConfig(mock.baseUrl());
-    const harness = createTestHarness({ manifest, capabilities: [...CAPABILITIES], config });
+    const harness = createRunCtxAwareHarness({ manifest, capabilities: [...CAPABILITIES], config });
     const worker = await bootWithReplay(harness, { config });
     const first = worker.client!;
     await worker.applyConfig(config, "configChanged", false);
@@ -426,7 +426,7 @@ describe("cache lifecycle: invalidation + rotation + reconnect (AC4)", () => {
         moonrakerApiKeyRef: "moonraker-key",
         auto_upload_artifacts: true,
       };
-      const harness = createTestHarness({ manifest, capabilities: [...CAPABILITIES], config });
+      const harness = createRunCtxAwareHarness({ manifest, capabilities: [...CAPABILITIES], config });
       const calls = countHostCalls(harness);
       const worker = await bootWithReplay(harness, {
         config,
@@ -481,7 +481,7 @@ describe("cache lifecycle: invalidation + rotation + reconnect (AC4)", () => {
 
   it("a resolve failure in-dispatch fails closed: tool refused, still dormant, no material in logs", async () => {
     const config = flashforgeConfig(mock.baseUrl(), { auto_upload_artifacts: true });
-    const harness = createTestHarness({ manifest, capabilities: [...CAPABILITIES], config });
+    const harness = createRunCtxAwareHarness({ manifest, capabilities: [...CAPABILITIES], config });
     countHostCalls(harness);
     harness.ctx.secrets.resolve = (async () => {
       throw new Error("Secret is not bound to plugin at flashforgeCheckCodeRef");

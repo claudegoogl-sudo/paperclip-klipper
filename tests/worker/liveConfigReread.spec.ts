@@ -10,7 +10,7 @@
  * re-registration in between, proving the read happens inside the handler.
  */
 import { describe, expect, it } from "vitest";
-import { createTestHarness } from "@paperclipai/plugin-sdk/testing";
+import { createRunCtxAwareHarness } from "../helpers/runCtxAwareHarness.js";
 import { MoonrakerClient } from "../../src/worker/MoonrakerClient.js";
 import { registerRpcSurface } from "../../src/worker/registerRpcSurface.js";
 import manifest from "../../src/manifest.js";
@@ -42,7 +42,7 @@ function setupHarness(initialConfig: Record<string, unknown>) {
     },
   } as unknown as MoonrakerClient;
 
-  const harness = createTestHarness({
+  const harness = createRunCtxAwareHarness({
     manifest,
     capabilities: [...CAPABILITIES],
     config: initialConfig,
@@ -67,6 +67,9 @@ function setupHarness(initialConfig: Record<string, unknown>) {
       { filename: "demo.gcode", artifactId: ARTIFACT_ID },
       {
         artifacts: {
+          async create() {
+            throw new Error("artifacts.create is not used by this plugin");
+          },
           async fetch() {
             return {
               bytes: new Uint8Array([0x47, 0x31]),
