@@ -5,6 +5,46 @@ plugin follows semver against the host plugin API (PLA-526 keeps
 `package.json.version` and the manifest version in lockstep via the build
 `define`).
 
+## 0.2.5 — 2026-09-24
+
+### Fixed
+- **Transport credentials resolve lazily inside tool dispatches —
+  config-apply resolves NOTHING.** 0.2.4 resolved `moonrakerApiKeyRef` /
+  `flashforgeCheckCodeRef` inside the host's scoped `configChanged` push,
+  but the host runs plugin applies async to that push, so every apply-time
+  resolve landed with 0 or 2+ invocations in flight and was DENIED by
+  single-in-flight attribution (`InvocationScopeDeniedError`) — no
+  credentialed transport ever came up. Resolution now happens in the one
+  reliably attributed context: an in-flight tool dispatch (the executeTool
+  scope carries companyId+runId). Ref-bearing transports converge DORMANT
+  at apply (fail-closed idle), the first credentialed dispatch resolves the
+  ref exactly once, starts the transport, and passes the gates; the
+  resolved plaintext is cached in memory keyed to the live config
+  fingerprint and invalidated on EVERY config application, so a rotated
+  secret lands at the next dispatch. The idle state is observable — status
+  data key, status tool, and health all report "credential not resolved
+  yet" — and a resolve failure keeps the transport dormant with no
+  credential material in any log. As a side effect, credentialed dispatches
+  no longer run on the last-applied company's client: the client is
+  rebuilt from the dispatching company's validated live config whenever
+  the connection fingerprint differs.
+- **Unauthenticated-moonraker dispatches are identity-guarded on the
+  shared worker.** The host runs ONE worker child per plugin, shared by
+  every company, and the unauth branch of the credential gate used to
+  return ok without comparing the live client against the dispatching
+  company's config — after company B's config row was applied last, a
+  company A dispatch uploaded to and drove B's printer (persistent
+  cross-tenant misrouting, not a rare race). The branch now validates the
+  live config (fail-closed on invalid), and rebuilds the client from it
+  whenever the live client's connection identity differs. Dispatch-time
+  rebuilds also keep the worker's config identity in sync, so the next
+  apply of the previous company's row correctly replaces the connection
+  instead of misreading it as an unchanged replay.
+- **upload_gcode order is gate → validate → resolve** (matching
+  start_print): a malformed filename or subdirectory is refused before any
+  credential resolve or transport start — a malformed call never spends a
+  resolve.
+
 ## 0.2.4 — 2026-09-24
 
 ### Fixed
