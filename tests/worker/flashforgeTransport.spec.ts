@@ -13,6 +13,18 @@
  *         validation error (no crash, no moonraker fallthrough).
  */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+
+async function waitFor(
+  predicate: () => boolean,
+  timeoutMs = 2000,
+  stepMs = 5,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() > deadline) throw new Error("waitFor: condition not met in time");
+    await new Promise((r) => setTimeout(r, stepMs));
+  }
+}
 import { createTestHarness } from "@paperclipai/plugin-sdk/testing";
 import manifest from "../../src/manifest.js";
 import plugin, { createKlipperWorker } from "../../src/worker.js";
@@ -153,15 +165,27 @@ describe("worker — flashforge transport happy paths (mock printer)", () => {
   });
 
   it("AC3: status data key serves the flashforge snapshot on the shared path", async () => {
-    const { harness, worker } = await makeWorker();
-    await worker.client!.start();
+    const { harness, worker } = await makeWorker({ auto_upload_artifacts: true });
+    // Bring the transport up through the PRODUCTION path — the in-dispatch
+    // credential resolution starts the poll loop; the status data key then
+    // serves whatever the poll warmed (no resolve of its own).
+    const res = await harness.executeTool<{ error?: string }>(
+      "klipper.upload_gcode",
+      { filename: "bracket.gcode", artifactId: ARTIFACT_ID },
+      artifactCtx(),
+    );
+    expect(res.error).toBeUndefined();
+    await waitFor(() => worker.client!.getConnectionState().state === "connected");
     try {
       const status = await harness.getData<{
         objects: Record<string, Record<string, unknown>>;
         connection: { state: string };
         updatedAt: string | null;
+        degraded?: boolean;
+        degradedReason?: string;
       }>("status");
       expect(status.connection.state).toBe("connected");
+      expect(status.degraded).toBeUndefined();
       expect(status.updatedAt).toBeTruthy();
       expect(status.objects.print_stats).toMatchObject({ state: "standby" });
       expect(status.objects.flashforge).toMatchObject({ model: "Creator 5" });
@@ -176,12 +200,35 @@ describe("worker — flashforge transport happy paths (mock printer)", () => {
       capabilities: [...CAPABILITIES],
       config: {},
     });
+    // Health reads NO config (only worker state + a transport probe) — the
+    // counter proves it. The upload dispatch below legitimately reads once
+    // (the in-dispatch gate check).
+    let configReads = 0;
+    const origGet = harness.ctx.config.get.bind(harness.ctx.config.get);
     harness.ctx.config.get = (async () => {
-      throw new Error('"config.get": company context is required');
+      configReads += 1;
+      return origGet();
     }) as typeof harness.ctx.config.get;
+    harness.setConfig(ffConfig(mock.baseUrl(), { auto_upload_artifacts: true }));
     await plugin.definition.setup(harness.ctx);
 
-    await plugin.definition.onConfigChanged?.(ffConfig(mock.baseUrl()));
+    await plugin.definition.onConfigChanged?.(
+      ffConfig(mock.baseUrl(), { auto_upload_artifacts: true }),
+    );
+    // Pre-dispatch the transport is dormant: health must say degraded with
+    // the pending reason, never a stale "ok".
+    const pending = await plugin.definition.onHealth!();
+    expect(pending.status).toBe("degraded");
+    expect(String(pending.message)).toMatch(/credential not resolved yet/);
+
+    // The in-dispatch credential resolution brings the transport up; a
+    // fresh probe against the reachable printer then reports ok.
+    const res = await harness.executeTool<{ error?: string }>(
+      "klipper.upload_gcode",
+      { filename: "bracket.gcode", artifactId: ARTIFACT_ID },
+      artifactCtx(),
+    );
+    expect(res.error).toBeUndefined();
     const healthy = await plugin.definition.onHealth!();
     expect(healthy.status).toBe("ok");
     expect(healthy.details).toMatchObject({
@@ -199,6 +246,8 @@ describe("worker — flashforge transport happy paths (mock printer)", () => {
     const refused = await plugin.definition.onHealth!();
     expect(refused.status).toBe("degraded");
     expect(refused.message).toMatch(/unreachable/i);
+    // Health never read config — only the upload dispatch's gate check did.
+    expect(configReads).toBe(1);
   });
 
   it("AC4: start_print is refused with the print gate unset — even with auto_upload on", async () => {

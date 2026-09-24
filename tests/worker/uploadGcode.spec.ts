@@ -185,7 +185,7 @@ function setupGunzipHarness(opts: {
   });
   registerRpcSurface(harness.ctx, {
     config,
-    client: fakeClient,
+    getClient: () => fakeClient,
     maxInflatedGcodeBytes: opts.maxInflatedGcodeBytes,
   });
 

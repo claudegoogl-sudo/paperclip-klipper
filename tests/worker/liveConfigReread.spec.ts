@@ -51,7 +51,7 @@ function setupHarness(initialConfig: Record<string, unknown>) {
   // moves per-dispatch. Register once, mutate config later via setConfig.
   registerRpcSurface(harness.ctx, {
     config: initialConfig as never,
-    client: fakeClient,
+    getClient: () => fakeClient,
   });
 
   const startPrint = () =>

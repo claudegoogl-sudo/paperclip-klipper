@@ -22,9 +22,13 @@ import {
   type MoonrakerStatusSnapshot,
 } from "./MoonrakerClient.js";
 import {
+  CREDENTIAL_PENDING_MESSAGE,
   FlashForgeApiError,
+  FlashForgeCredentialPendingError,
   FlashForgeOutboundScopeError,
 } from "./transports/FlashForgeClient.js";
+import { validateFlashForgeConfig } from "./transports/validateTransportConfig.js";
+import { validateMoonrakerBaseUrl } from "./validateMoonrakerBaseUrl.js";
 import type { PrinterTransport } from "./transports/PrinterTransport.js";
 import type { SecretRef } from "./secretRef.js";
 
@@ -81,16 +85,40 @@ export interface KlipperConfig {
   allow_agent_initiated_print?: boolean;
 }
 
+/** Result of the worker's lazy in-dispatch credential resolution. */
+export type CredentialResolution =
+  | { ok: true }
+  | { ok: false; reason: string };
+
 export interface RpcSurfaceOptions {
   config: KlipperConfig;
   /**
-   * Printer transport (Moonraker or FlashForge), or `null` when the worker
-   * started without usable transport config. When `null`, every handler
-   * short-circuits with a `prerequisite_missing` result rather than
-   * dereferencing the client. See the permissive-init pattern (matches the
-   * CAD plugin).
+   * Read the CURRENT printer transport. Handlers MUST NOT pin the client
+   * at registration time: an in-dispatch credential resolution can
+   * converge (replace) the client object while a dispatch is in flight,
+   * and the stale object must never be used for the actual tool call.
+   * `null` = the worker started without usable transport config; handlers
+   * short-circuit with a `prerequisite_missing` result (permissive-init
+   * pattern, matches the CAD plugin).
    */
-  client: PrinterTransport | null;
+  getClient: () => PrinterTransport | null;
+  /**
+   * Why the transport is not running yet ("credential not resolved
+   * yet"), or `null`. Merged into the status surfaces so the fail-closed
+   * idle state is observable instead of a misleading gate error.
+   */
+  getDegradedReason?: () => string | null;
+  /**
+   * Resolve the configured credential ref lazily INSIDE a tool dispatch
+   * (authorized by dispatch attribution), cache the plaintext in memory,
+   * inject it into the transport and start it. Called by the tool
+   * handlers that need a live transport; data keys / actions NEVER call
+   * it (they run outside dispatches and must not fire worker→host calls).
+   */
+  ensureCredential?: (
+    liveConfig: Partial<KlipperConfig>,
+    method: string,
+  ) => Promise<CredentialResolution>;
   /** Emit a status snapshot to the UI stream channel used by `usePluginStream`. */
   emitStreamSnapshot?: (snapshot: MoonrakerStatusSnapshot) => void;
   /** Emit a connection-state event to the UI stream channel. */
@@ -232,13 +260,17 @@ export function registerRpcSurface(
   ctx: PluginContext,
   options: RpcSurfaceOptions,
 ): void {
-  const { config, client } = options;
+  const { config } = options;
   const transportKind = config.transport === "flashforge" ? "flashforge" : "moonraker";
+  // "Configured" means the transport config VALIDATES (same validators the
+  // worker converges against) — a rejected value must report unconfigured,
+  // not merely "a value is present".
   const configured =
-    client !== null &&
-    (transportKind === "moonraker"
-      ? Boolean(config.moonrakerBaseUrl)
-      : Boolean(config.flashforgeBaseUrl));
+    transportKind === "moonraker"
+      ? config.moonrakerBaseUrl !== undefined &&
+        config.moonrakerBaseUrl !== "" &&
+        validateMoonrakerBaseUrl(config.moonrakerBaseUrl, config.moonrakerAllowedHosts).ok
+      : validateFlashForgeConfig(config).ok;
   const prereqMessage =
     transportKind === "flashforge"
       ? FLASHFORGE_PREREQ_MISSING_MESSAGE
@@ -269,31 +301,52 @@ export function registerRpcSurface(
     return base;
   });
 
+  /**
+   * Merge the worker-level "credential not resolved yet" signal into a
+   * status snapshot. The fail-closed idle state must be OBSERVABLE — a
+   * bare stale snapshot would read like a healthy-but-idle printer.
+   */
+  const withDegradedReason = (
+    snapshot: MoonrakerStatusSnapshot,
+  ): MoonrakerStatusSnapshot & { degraded?: boolean; degradedReason?: string } => {
+    const reason = options.getDegradedReason?.() ?? null;
+    return reason === null
+      ? snapshot
+      : { ...snapshot, degraded: true, degradedReason: reason };
+  };
+
   // `usePluginData("status")` reads the cached snapshot. We do not block on
-  // a fresh /printer/info call — the WS subscription keeps the snapshot warm
-  // and the UI can call the `refresh` action to force a refetch.
+  // a fresh /printer/info call — the WS subscription / poll loop keeps the
+  // snapshot warm and the UI can call the `refresh` action to force a
+  // refetch. This surface NEVER resolves credentials (it runs outside
+  // dispatches): before the first credentialed dispatch it reports the
+  // degraded reason instead.
   ctx.data.register("status", async () => {
+    const client = options.getClient();
     if (!client) {
       return {
         connection: { state: "idle", attempts: 0, configured: false },
         objects: null,
       };
     }
-    return client.getStatusSnapshot();
+    return withDegradedReason(client.getStatusSnapshot());
   });
 
   ctx.data.register("connection", async () => {
+    const client = options.getClient();
     if (!client) return { state: "idle", attempts: 0, configured: false };
     return client.getConnectionState();
   });
 
   ctx.data.register("files", async (params: Record<string, unknown>) => {
+    const client = options.getClient();
     if (!client) return [];
     const root = typeof params.root === "string" ? params.root : "gcodes";
     return client.listFiles(root);
   });
 
   ctx.data.register("file_metadata", async (params: Record<string, unknown>) => {
+    const client = options.getClient();
     if (!client) throw prerequisiteMissingError(prereqMessage);
     const filename = typeof params.filename === "string" ? params.filename : "";
     if (!filename) throw new Error("file_metadata requires `filename`");
@@ -305,25 +358,32 @@ export function registerRpcSurface(
   // MoonrakerClient instance — no duplicated transport. When config is
   // missing they throw `prerequisite_missing` so the host surfaces a
   // structured error to the caller.
+  // NOTE: actions run OUTSIDE dispatches — they consume the client-held
+  // credential only and NEVER resolve (the client throws its
+  // "credential not resolved yet" error while the transport is dormant).
   ctx.actions.register("refresh", async () => {
+    const client = options.getClient();
     if (!client) throw prerequisiteMissingError(prereqMessage);
     const info = await client.getPrinterInfo();
     return { ok: true, info, snapshot: client.getStatusSnapshot() };
   });
 
   ctx.actions.register("pause_print", async () => {
+    const client = options.getClient();
     if (!client) throw prerequisiteMissingError(prereqMessage);
     const result = await client.pausePrint();
     return { ok: true, result };
   });
 
   ctx.actions.register("resume_print", async () => {
+    const client = options.getClient();
     if (!client) throw prerequisiteMissingError(prereqMessage);
     const result = await client.resumePrint();
     return { ok: true, result };
   });
 
   ctx.actions.register("cancel_print", async () => {
+    const client = options.getClient();
     if (!client) throw prerequisiteMissingError(prereqMessage);
     const result = await client.cancelPrint();
     return { ok: true, result };
@@ -333,6 +393,7 @@ export function registerRpcSurface(
   // `allow_agent_initiated_print` — that flag covers agent tools; a user
   // tapping the Start button in the UI is its own consent signal.
   ctx.actions.register("start_print", async (params: Record<string, unknown>) => {
+    const client = options.getClient();
     if (!client) throw prerequisiteMissingError(prereqMessage);
     const filename = typeof params.filename === "string" ? params.filename : "";
     if (!filename) throw new Error("start_print requires `filename`");
@@ -341,6 +402,7 @@ export function registerRpcSurface(
   });
 
   ctx.actions.register("delete_file", async (params: Record<string, unknown>) => {
+    const client = options.getClient();
     if (!client) throw prerequisiteMissingError(prereqMessage);
     const path = typeof params.path === "string" ? params.path : "";
     if (!path) throw new Error("delete_file requires `path`");
@@ -350,6 +412,7 @@ export function registerRpcSurface(
   });
 
   ctx.actions.register("retry_connection", async () => {
+    const client = options.getClient();
     if (!client) throw prerequisiteMissingError(prereqMessage);
     await client.retryConnection();
     return { ok: true, connection: client.getConnectionState() };
@@ -372,10 +435,14 @@ export function registerRpcSurface(
       parametersSchema: { type: "object", properties: {}, additionalProperties: false },
     },
     async (): Promise<ToolResult> => {
+      const client = options.getClient();
       if (!client) return prerequisiteMissingToolResult(prereqMessage);
       try {
+        // Cache-only by design (no resolve, no network): status consumes
+        // what the transport already holds and reports the degraded
+        // reason while the credential is unresolved.
         const snapshot = client.getStatusSnapshot();
-        return { data: snapshot };
+        return { data: withDegradedReason(snapshot) };
       } catch (err) {
         return toolError(err, "get_printer_status");
       }
@@ -426,6 +493,7 @@ export function registerRpcSurface(
       },
     },
     async (params, runCtx): Promise<ToolResult> => {
+      const client = options.getClient();
       if (!client) return prerequisiteMissingToolResult(prereqMessage);
       // Re-read config live on every dispatch — never gate off the value
       // captured at setup(). Fails closed if the read errors.
@@ -443,10 +511,15 @@ export function registerRpcSurface(
           artifactId: string;
           path?: string;
         };
-        // Reject an unsafe filename before any artifact fetch or upload:
-        // `filename` is interpolated into the multipart Content-Disposition
-        // of both transports, so the worker re-checks the schema pattern
-        // (defense-in-depth — same reasoning as the `path` backstop below).
+        // Gate → validate → resolve (matching start_print and the stated
+        // invariant): local validation runs FIRST so a malformed call never
+        // spends a resolve or starts the dormant transport; a refused gate
+        // never does either.
+        // Reject an unsafe filename before any resolve, artifact fetch or
+        // upload: `filename` is interpolated into the multipart
+        // Content-Disposition of both transports, so the worker re-checks
+        // the schema pattern (defense-in-depth — same reasoning as the
+        // `path` backstop below).
         {
           const reason = uploadFilenameError(filename);
           if (reason !== null) {
@@ -457,10 +530,10 @@ export function registerRpcSurface(
             return { error: `upload_gcode: refused — filename ${reason}.` };
           }
         }
-        // Reject a traversal-y subdirectory before any artifact fetch
-        // or upload. Defense-in-depth over the schema `pattern`; an empty path
-        // means "no subdirectory" (matches MoonrakerClient's truthiness check)
-        // and is left to pass through untouched.
+        // Reject a traversal-y subdirectory before any resolve, artifact
+        // fetch or upload. Defense-in-depth over the schema `pattern`; an
+        // empty path means "no subdirectory" (matches MoonrakerClient's
+        // truthiness check) and is left to pass through untouched.
         if (typeof path === "string" && path.length > 0) {
           const reason = uploadPathError(path);
           if (reason !== null) {
@@ -471,6 +544,21 @@ export function registerRpcSurface(
             });
             return { error: `upload_gcode: refused — path ${reason}.` };
           }
+        }
+        // Lazy credential resolution — INSIDE the dispatch (dispatch
+        // attribution authorizes `secrets.resolve`). Runs after the local
+        // validation above so a malformed call never spends a resolve. The
+        // resolution also STARTS the dormant transport, so the first
+        // upload brings the printer online.
+        let active = client;
+        if (options.ensureCredential) {
+          const cred = await options.ensureCredential(liveConfig, "upload_gcode");
+          if (!cred.ok) {
+            return { error: `upload_gcode: refused — ${cred.reason}` };
+          }
+          // The resolution may have converged (replaced) the client object;
+          // the actual upload must use the CURRENT one.
+          active = options.getClient() ?? client;
         }
         // The host resolves the attachment under the dispatching
         // agent's identity. The worker never base64-decodes inline bytes.
@@ -511,7 +599,7 @@ export function registerRpcSurface(
             inflatedBytes: bytes.length,
           });
         }
-        const result = await client.uploadGcode(filename, bytes, { path });
+        const result = await active.uploadGcode(filename, bytes, { path });
         return { data: result };
       } catch (err) {
         return toolError(err, "upload_gcode");
@@ -540,6 +628,7 @@ export function registerRpcSurface(
       },
     },
     async (params): Promise<ToolResult> => {
+      const client = options.getClient();
       if (!client) return prerequisiteMissingToolResult(prereqMessage);
       // Re-read config live on every dispatch — never gate off the value
       // captured at setup(). Fails closed if the read errors.
@@ -566,7 +655,18 @@ export function registerRpcSurface(
             return { error: `start_print: refused — filename ${reason}.` };
           }
         }
-        const result = await client.startPrint(filename);
+        // Lazy credential resolution — INSIDE the dispatch (see
+        // upload_gcode). Gate + validation run first; a refused dispatch
+        // never spends a resolve.
+        let active = client;
+        if (options.ensureCredential) {
+          const cred = await options.ensureCredential(liveConfig, "start_print");
+          if (!cred.ok) {
+            return { error: `start_print: refused — ${cred.reason}` };
+          }
+          active = options.getClient() ?? client;
+        }
+        const result = await active.startPrint(filename);
         return { data: { ok: true, result } };
       } catch (err) {
         return toolError(err, "start_print");
@@ -583,6 +683,12 @@ export function registerRpcSurface(
  * context window.
  */
 function toolError(err: unknown, toolName: string): ToolResult {
+  if (err instanceof FlashForgeCredentialPendingError) {
+    return {
+      error: `${toolName}: refused — ${CREDENTIAL_PENDING_MESSAGE}`,
+      data: { error: "credential_pending" },
+    };
+  }
   if (err instanceof MoonrakerHttpError) {
     return {
       error: `${toolName}: ${err.message}`,
