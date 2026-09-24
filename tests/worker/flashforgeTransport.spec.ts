@@ -16,6 +16,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createTestHarness } from "@paperclipai/plugin-sdk/testing";
 import manifest from "../../src/manifest.js";
 import plugin, { createKlipperWorker } from "../../src/worker.js";
+import { bootWithReplay } from "../helpers/replayBoot.js";
 import { MockFlashForge } from "../fixtures/flashforge/mockServer.js";
 import {
   selectTransport,
@@ -86,8 +87,7 @@ describe("worker — flashforge transport happy paths (mock printer)", () => {
       capabilities: [...CAPABILITIES],
       config: ffConfig(mock.baseUrl(), extraConfig),
     });
-    const worker = await createKlipperWorker(harness.ctx, {
-      autoStart: false,
+    const worker = await bootWithReplay(harness, {
       flashforgeClientOverrides: { pollIntervalMs: 60_000 },
     });
     return { harness, worker };
@@ -282,7 +282,7 @@ describe("worker — fail-closed transport config validation (AC5)", () => {
 
   it("missing flashforge config yields a clear validation error and a null client (no moonraker fallthrough)", async () => {
     const harness = makeHarnessWithConfig({ transport: "flashforge" });
-    const worker = await createKlipperWorker(harness.ctx, { autoStart: false });
+    const worker = await bootWithReplay(harness);
 
     expect(worker.client).toBeNull();
     expect(
@@ -309,7 +309,7 @@ describe("worker — fail-closed transport config validation (AC5)", () => {
       transport: "flashforge",
       flashforgeBaseUrl: mock.baseUrl(),
     });
-    const worker = await createKlipperWorker(harness.ctx, { autoStart: false });
+    const worker = await bootWithReplay(harness);
     expect(worker.client).toBeNull();
     expect(
       harness.logs.some((e) => e.level === "warn" && /flashforgeSerialNumber/.test(JSON.stringify(e.meta ?? {}))),
@@ -318,7 +318,7 @@ describe("worker — fail-closed transport config validation (AC5)", () => {
 
   it("an invalid transport value is rejected with a clear error (never coerced)", async () => {
     const harness = makeHarnessWithConfig({ transport: "octoprint" });
-    const worker = await createKlipperWorker(harness.ctx, { autoStart: false });
+    const worker = await bootWithReplay(harness);
     expect(worker.client).toBeNull();
     expect(
       harness.logs.some(
@@ -332,7 +332,7 @@ describe("worker — fail-closed transport config validation (AC5)", () => {
 
   it("switching a live flashforge client to invalid config stops the client", async () => {
     const harness = makeHarnessWithConfig(ffConfig(mock.baseUrl()));
-    const worker = await createKlipperWorker(harness.ctx, { autoStart: false });
+    const worker = await bootWithReplay(harness);
     expect(worker.client).not.toBeNull();
     const stopped: string[] = [];
     const previous = worker.client!;
@@ -345,7 +345,7 @@ describe("worker — fail-closed transport config validation (AC5)", () => {
 
   it("an identical flashforge config replay converges on one client", async () => {
     const harness = makeHarnessWithConfig(ffConfig(mock.baseUrl()));
-    const worker = await createKlipperWorker(harness.ctx, { autoStart: false });
+    const worker = await bootWithReplay(harness);
     const first = worker.client;
     await worker.applyConfig(ffConfig(mock.baseUrl()), "configChanged", false);
     await worker.applyConfig(ffConfig(mock.baseUrl()), "configChanged", false);
@@ -448,8 +448,7 @@ describe("worker — flashforge transport with object checkCodeRef (mock printer
     }) as typeof harness.ctx.secrets.resolve;
     void origResolve;
 
-    await createKlipperWorker(harness.ctx, {
-      autoStart: false,
+    await bootWithReplay(harness, {
       flashforgeClientOverrides: { pollIntervalMs: 60_000 },
     });
 
@@ -528,8 +527,7 @@ describe("worker — flashforge transport with padded string checkCodeRef (trim 
     }) as typeof harness.ctx.secrets.resolve;
     void origResolve;
 
-    await createKlipperWorker(harness.ctx, {
-      autoStart: false,
+    await bootWithReplay(harness, {
       flashforgeClientOverrides: { pollIntervalMs: 60_000 },
     });
 

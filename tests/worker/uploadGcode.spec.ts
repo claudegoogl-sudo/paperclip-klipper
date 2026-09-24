@@ -67,14 +67,6 @@ function makeNoopLogger(): PluginLogger {
   };
 }
 
-function makeStubSecrets(): PluginSecretsClient {
-  return {
-    async resolve(_ref: string) {
-      return "stub-secret";
-    },
-  };
-}
-
 function lowerKey(headers: HeadersInit | undefined, key: string): string | undefined {
   if (!headers) return undefined;
   if (headers instanceof Headers) return headers.get(key) ?? undefined;
@@ -97,7 +89,7 @@ describe("MoonrakerClient.uploadGcode — multipart Content-Type", () => {
     const client = new MoonrakerClient({
       baseUrl: "http://printer.lan:7125/",
       http,
-      secrets: makeStubSecrets(),
+      apiKey: "stub-secret",
       logger: makeNoopLogger(),
     });
 

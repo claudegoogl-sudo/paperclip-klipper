@@ -14,7 +14,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createTestHarness } from "@paperclipai/plugin-sdk/testing";
 import manifest from "../src/manifest.js";
-import { createKlipperWorker } from "../src/worker.js";
+import { bootWithReplay } from "./helpers/replayBoot.js";
 import {
   MoonrakerClient,
   MoonrakerOutboundScopeError,
@@ -113,7 +113,7 @@ describe("MoonrakerClient REST", () => {
       moonrakerBaseUrl: mock.baseUrl(),
       moonrakerApiKeyRef: SECRET_REF,
     });
-    const { client } = expectClient(await createKlipperWorker(harness.ctx, { autoStart: false }));
+    const { client } = expectClient(await bootWithReplay(harness));
 
     const info = await client.getPrinterInfo();
     expect(info.state).toBe("ready");
@@ -168,7 +168,7 @@ describe("MoonrakerClient REST", () => {
       return RESOLVED_KEY;
     }) as typeof harness.ctx.secrets.resolve;
 
-    const { client } = expectClient(await createKlipperWorker(harness.ctx, { autoStart: false }));
+    const { client } = expectClient(await bootWithReplay(harness));
     const info = await client.getPrinterInfo();
     expect(info.state).toBe("ready");
 
@@ -185,7 +185,7 @@ describe("MoonrakerClient REST", () => {
       moonrakerBaseUrl: mock.baseUrl(),
       moonrakerApiKeyRef: SECRET_REF,
     });
-    const { client } = expectClient(await createKlipperWorker(harness.ctx, { autoStart: false }));
+    const { client } = expectClient(await bootWithReplay(harness));
 
     const payload = Buffer.from("G28\nG1 X10 Y10\n");
     const result = await client.uploadGcode("part.gcode", payload);
@@ -205,7 +205,7 @@ describe("MoonrakerClient REST", () => {
     const client = new MoonrakerClient({
       baseUrl: mock.baseUrl(),
       http: harness.ctx.http,
-      secrets: harness.ctx.secrets,
+      apiKey: null,
       logger: harness.ctx.logger,
     });
     // Force the private method by using `as any` casts is brittle; instead
@@ -246,8 +246,7 @@ describe("MoonrakerClient WebSocket", () => {
       moonrakerApiKeyRef: SECRET_REF,
     });
     const updates: number[] = [];
-    const { client } = expectClient(await createKlipperWorker(harness.ctx, {
-      autoStart: false,
+    const { client } = expectClient(await bootWithReplay(harness, {
       clientOverrides: {
         onStatus: () => updates.push(Date.now()),
       },
@@ -282,8 +281,7 @@ describe("MoonrakerClient WebSocket", () => {
       moonrakerBaseUrl: mock.baseUrl(),
       moonrakerApiKeyRef: SECRET_REF,
     });
-    const { client } = expectClient(await createKlipperWorker(harness.ctx, {
-      autoStart: false,
+    const { client } = expectClient(await bootWithReplay(harness, {
       clientOverrides: {
         reconnect: {
           initialDelayMs: 50,
@@ -322,8 +320,7 @@ describe("MoonrakerClient WebSocket", () => {
       moonrakerBaseUrl: mock.baseUrl(),
       moonrakerApiKeyRef: SECRET_REF,
     });
-    const { client } = expectClient(await createKlipperWorker(harness.ctx, {
-      autoStart: false,
+    const { client } = expectClient(await bootWithReplay(harness, {
       clientOverrides: {
         reconnect: {
           initialDelayMs: 25,
@@ -369,7 +366,7 @@ describe("MoonrakerClient unauthenticated mode", () => {
     const { harness } = harnessWithStreams({
       moonrakerBaseUrl: mock.baseUrl(),
     });
-    const { client } = expectClient(await createKlipperWorker(harness.ctx, { autoStart: false }));
+    const { client } = expectClient(await bootWithReplay(harness));
 
     await client.getPrinterInfo();
     // No X-Api-Key header was sent on any request.

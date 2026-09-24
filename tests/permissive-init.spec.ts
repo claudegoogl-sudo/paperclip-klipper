@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { createTestHarness } from "@paperclipai/plugin-sdk/testing";
 import manifest from "../src/manifest.js";
 import { createKlipperWorker } from "../src/worker.js";
+import { bootWithReplay } from "./helpers/replayBoot.js";
 
 /**
  * Permissive worker init.
@@ -34,11 +35,13 @@ describe("paperclip-klipper permissive init", () => {
     });
     const worker = await createKlipperWorker(harness.ctx, { autoStart: false });
     expect(worker.client).toBeNull();
-    // The warn log line is a documented contract — operators rely on it to
-    // know why a freshly installed plugin is inert.
+    expect(worker.configKnown).toBe(false);
+    // The boot log line is a documented contract — operators rely on it to
+    // know why a freshly installed plugin is inert. setup() makes no
+    // config read at all, so nothing fires until the host replay lands.
     expect(
       harness.logs.some(
-        (e) => e.level === "warn" && e.message.includes("moonrakerBaseUrl"),
+        (e) => e.level === "info" && e.message.includes("booted without a config read"),
       ),
     ).toBe(true);
   });
@@ -150,7 +153,7 @@ describe("paperclip-klipper permissive init", () => {
       capabilities: [...CAPABILITIES],
       config: { moonrakerBaseUrl: "http://127.0.0.1:1" },
     });
-    await createKlipperWorker(harness.ctx, { autoStart: false });
+    await bootWithReplay(harness);
     const cfg = await harness.getData<{
       configured: boolean;
       moonrakerBaseUrl: string | null;

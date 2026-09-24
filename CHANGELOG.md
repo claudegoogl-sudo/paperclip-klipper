@@ -5,6 +5,45 @@ plugin follows semver against the host plugin API (PLA-526 keeps
 `package.json.version` and the manifest version in lockstep via the build
 `define`).
 
+## 0.2.4 — 2026-09-24
+
+### Fixed
+- **Dispatch-time config/secret reads are no longer denied
+  (`InvocationScopeDeniedError`).** The host attributes worker→host RPCs that
+  do not echo an invocation id via single-in-flight attribution, and any
+  id-less call with nothing in flight permanently denies that method for the
+  worker's lifetime. Two worker paths kept tripping it:
+  `setup()` made a best-effort `ctx.config.get()` in service scope
+  (poisoning `config.get` at spawn), and the FlashForge status poll resolved
+  the check-code secret once per `/detail` cycle (~every 10s, almost always
+  outside any dispatch — poisoning `secrets.resolve`). The first real
+  dispatch then failed closed: the upload gate's live config re-read got the
+  poisoned denial, degraded to `{}`, and refused the upload with a
+  misleading "auto_upload_artifacts is false" even though the persisted
+  config was correct; the upload would have failed at secret resolution
+  next.
+
+### Changed
+- **setup() makes no worker→host calls.** Config reaches the worker
+  exclusively through the host's `configChanged` replay (boot) and operator
+  saves — the path the host actually implements. Until it lands, the worker
+  boots permissive and tools return `prerequisite_missing`.
+- **Transport credentials resolve once per config application.**
+  `moonrakerApiKeyRef` / `flashforgeCheckCodeRef` are resolved inside the
+  host's scoped `configChanged` push and handed to the transport client,
+  which holds the plaintext in memory only (never logged, redaction guards
+  unchanged). The status poll, WS reconnect loop, health probes, and UI data
+  keys now make ZERO worker→host calls. The cache never outlives the config
+  that produced it: every application (including unchanged-connection
+  replays) re-resolves and swaps the value in, and a resolve failure stops
+  the transport fail-closed (tools return `prerequisite_missing`). A rotated
+  secret takes effect at the next config save or worker restart — per-call
+  freshness for dispatch-driven requests is the one behavior this trade
+  retires, and it is documented in the manifest and README.
+- In-dispatch gate reads (`ctx.config.get()` inside tool handlers) are
+  unchanged: with the spawn and idle paths fixed, those calls always run
+  with a dispatch in flight and stay attributed.
+
 ## 0.2.3 — 2026-09-23
 
 ### Fixed

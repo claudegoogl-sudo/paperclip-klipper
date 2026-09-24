@@ -13,7 +13,7 @@
  *   - the check code credential never appears in logger output.
  */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import type { PluginHttpClient, PluginLogger, PluginSecretsClient } from "@paperclipai/plugin-sdk";
+import type { PluginHttpClient, PluginLogger } from "@paperclipai/plugin-sdk";
 import {
   FlashForgeClient,
   detailToSnapshotObjects,
@@ -24,7 +24,6 @@ import { MockFlashForge } from "../fixtures/flashforge/mockServer.js";
 
 const SERIAL = "SN-TEST-C5";
 const CHECK_CODE = "CHECK-CODE-TEST";
-const SECRET_REF = "secret-ref/flashforge-check-code";
 
 interface CapturedLog {
   level: string;
@@ -54,15 +53,6 @@ function makeHttp(): PluginHttpClient {
   };
 }
 
-function makeSecrets(resolved = CHECK_CODE): PluginSecretsClient {
-  return {
-    async resolve(_ref: string) {
-      expect(_ref).toBe(SECRET_REF);
-      return resolved;
-    },
-  };
-}
-
 function headerOf(
   req: { headers: Record<string, string | string[] | undefined> },
   name: string,
@@ -89,9 +79,8 @@ describe("FlashForgeClient — upload (mock HTTP API)", () => {
     return new FlashForgeClient({
       baseUrl: mock.baseUrl(),
       serialNumber: SERIAL,
-      checkCodeRef: SECRET_REF,
+    checkCode: CHECK_CODE,
       http: makeHttp(),
-      secrets: makeSecrets(),
       logger: makeCapturingLogger(logs),
       // Never schedule follow-up polls in these tests.
       pollIntervalMs: 60_000,
@@ -151,9 +140,8 @@ describe("FlashForgeClient — upload (mock HTTP API)", () => {
     const client = new FlashForgeClient({
       baseUrl: mock.baseUrl(),
       serialNumber: "WRONG-SN",
-      checkCodeRef: SECRET_REF,
+    checkCode: CHECK_CODE,
       http: makeHttp(),
-      secrets: makeSecrets(),
       logger: makeCapturingLogger(logs),
     });
     await expect(
@@ -194,9 +182,8 @@ describe("FlashForgeClient — status, files, jobs, print start", () => {
     return new FlashForgeClient({
       baseUrl: mock.baseUrl(),
       serialNumber: SERIAL,
-      checkCodeRef: SECRET_REF,
+    checkCode: CHECK_CODE,
       http: makeHttp(),
-      secrets: makeSecrets(),
       logger: makeCapturingLogger(logs),
       pollIntervalMs: 60_000,
     });
@@ -286,9 +273,8 @@ describe("FlashForgeClient — fail-closed health", () => {
     return new FlashForgeClient({
       baseUrl,
       serialNumber: SERIAL,
-      checkCodeRef: SECRET_REF,
+    checkCode: CHECK_CODE,
       http: makeHttp(),
-      secrets: makeSecrets(),
       logger: makeCapturingLogger(logs),
       pollIntervalMs: 60_000,
       probeTimeoutMs: 2_000,
@@ -333,9 +319,8 @@ describe("FlashForgeClient — poll failure lifecycle", () => {
     const client = new FlashForgeClient({
       baseUrl: `http://127.0.0.1:${port}`,
       serialNumber: SERIAL,
-      checkCodeRef: SECRET_REF,
+    checkCode: CHECK_CODE,
       http: makeHttp(),
-      secrets: makeSecrets(),
       logger: makeCapturingLogger(logs),
       pollIntervalMs: 10,
       maxAttempts: 1,
@@ -403,107 +388,5 @@ describe("FlashForge machine-state mapping", () => {
       rightTargetTemp: 0,
     });
     expect(fallback.extruder).toMatchObject({ temperature: 25, target: 0 });
-  });
-});
-
-/**
- * Object-shaped secret binding refs. Current host generations bind config
- * secrets as { type: "secret_ref", secretId, version? } and REJECT legacy
- * string refs at resolution time, so the transport must carry the object
- * through to ctx.secrets.resolve untouched and the resolved check code must
- * reach the wire exactly as it does for string refs.
- */
-describe("FlashForgeClient — object-shaped check code ref", () => {
-  const UUID = "690a5384-1234-4abc-8abc-000000000001";
-  let mock: MockFlashForge;
-  let logs: CapturedLog[];
-
-  beforeEach(async () => {
-    mock = new MockFlashForge({ serialNumber: SERIAL, checkCode: CHECK_CODE });
-    await mock.start();
-    logs = [];
-  });
-
-  afterEach(async () => {
-    await mock.stop();
-  });
-
-  function makeSpySecrets(
-    resolvedCheckCode: string,
-    calls: unknown[],
-  ): PluginSecretsClient {
-    return {
-      async resolve(ref: string) {
-        calls.push(ref);
-        return resolvedCheckCode;
-      },
-    };
-  }
-
-  it("resolves the object ref per request and delivers the same check code to the wire", async () => {
-    const calls: unknown[] = [];
-    const client = new FlashForgeClient({
-      baseUrl: mock.baseUrl(),
-      serialNumber: SERIAL,
-      checkCodeRef: { type: "secret_ref", secretId: UUID },
-      http: makeHttp(),
-      secrets: makeSpySecrets(CHECK_CODE, calls),
-      logger: makeCapturingLogger(logs),
-      pollIntervalMs: 60_000,
-    });
-
-    const payload = new Uint8Array([0x47, 0x31, 0x0a]); // "G1\n"
-    const result = await client.uploadGcode("bracket.gcode", payload);
-
-    // The OBJECT reached the secrets client verbatim — no coercion to a
-    // string, no silent fallback.
-    expect(calls).toEqual([{ type: "secret_ref", secretId: UUID }]);
-
-    // The RESOLVED VALUE authenticates exactly as with a string ref.
-    const upload = mock.recordedRequests.find((r) => r.url === "/uploadGcode");
-    expect(upload).toBeDefined();
-    expect(headerOf({ headers: upload!.headers }, "checkcode")).toBe(CHECK_CODE);
-    expect(result.item.path).toBe("bracket.gcode");
-  });
-
-  it("pins the version through to the secrets client when configured", async () => {
-    const calls: unknown[] = [];
-    const client = new FlashForgeClient({
-      baseUrl: mock.baseUrl(),
-      serialNumber: SERIAL,
-      checkCodeRef: { type: "secret_ref", secretId: UUID, version: 2 },
-      http: makeHttp(),
-      secrets: makeSpySecrets(CHECK_CODE, calls),
-      logger: makeCapturingLogger(logs),
-      pollIntervalMs: 60_000,
-    });
-
-    await client.probeHealth();
-
-    expect(calls).toEqual([{ type: "secret_ref", secretId: UUID, version: 2 }]);
-    const detail = mock.recordedRequests.find((r) => r.url === "/detail");
-    expect(detail).toBeDefined();
-  });
-
-  it("refuses the request (fail closed) when the host cannot resolve the object ref", async () => {
-    const client = new FlashForgeClient({
-      baseUrl: mock.baseUrl(),
-      serialNumber: SERIAL,
-      checkCodeRef: { type: "secret_ref", secretId: UUID },
-      http: makeHttp(),
-      secrets: {
-        async resolve() {
-          throw new Error("Secret is not bound to plugin at flashforgeCheckCodeRef");
-        },
-      },
-      logger: makeCapturingLogger(logs),
-      pollIntervalMs: 60_000,
-    });
-
-    await expect(
-      client.uploadGcode("x.gcode", new Uint8Array([1])),
-    ).rejects.toThrow(/not bound to plugin/i);
-    // Nothing reached the printer.
-    expect(mock.recordedRequests).toHaveLength(0);
   });
 });

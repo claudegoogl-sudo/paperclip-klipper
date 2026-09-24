@@ -1,14 +1,17 @@
 /**
- * Boot-time config denial + host replay (fork.37+ service-context semantics).
+ * Boot-time config contract + host replay.
  *
  * The host spawns plugin workers with an EMPTY bootstrap config and replays
  * each configured company's stored row through the `configChanged` RPC right
- * after boot. `ctx.config.get()` from setup() runs in service scope with no
- * company attached, so the host denies it ("company context is required").
- * The worker must:
+ * after boot. setup() makes NO `ctx.config.get()` call at all — a
+ * worker→host call from setup runs in service scope with nothing in flight,
+ * and the host's single-in-flight attribution permanently DENIES the method
+ * for the worker's lifetime (an early version did attempt a best-effort
+ * setup read; the denial poisoned `config.get` so every later in-dispatch
+ * gate re-read failed closed). The worker must:
  *
- *   1. treat that denial as UNKNOWN config — NOT a setup failure — so the
- *      worker process stays alive, lifecycle holds `ready`, and the three
+ *   1. boot permissive WITHOUT touching `ctx.config.get()` — zero
+ *      worker→host calls at spawn, lifecycle holds `ready`, and the three
  *      manifest tools stay registered (returning `prerequisite_missing`);
  *   2. apply the config the host replays through `onConfigChanged` and start
  *      the Moonraker client from it, with no worker restart;
@@ -16,10 +19,6 @@
  *      churn clients), stop the old client when the connection identity
  *      actually changes, and degrade back to permissive init when the replayed
  *      config is absent or invalid — never crash the worker.
- *
- * This file regression-tests exactly the live boot failure: setup throwing
- * on the denied read meant lifecycle went ready→error and no worker process
- * existed at all.
  */
 import { describe, expect, it } from "vitest";
 import { createTestHarness } from "@paperclipai/plugin-sdk/testing";
@@ -36,14 +35,20 @@ const CAPABILITIES = [
 
 const BASE_CONFIG = { moonrakerBaseUrl: "http://printer.lan:7125" };
 
-/** The exact live denial shape (service-context authz refusal). */
-function denySetupConfigRead(harness: ReturnType<typeof createTestHarness>) {
+/**
+ * Count `ctx.config.get()` calls. The boot contract is that setup NEVER
+ * calls it (a service-scope call with nothing in flight permanently poisons
+ * the method on real hosts), so every test in this file can assert the
+ * counter stays at zero until a dispatch-driven read happens.
+ */
+function countConfigReads(harness: ReturnType<typeof createTestHarness>) {
+  const calls = { count: 0 };
+  const orig = harness.ctx.config.get.bind(harness.ctx.config.get);
   harness.ctx.config.get = (async () => {
-    throw new Error(
-      'Plugin "2bdf8ee8-b57b-4363-9fdc-36780acc2e4a" is not allowed to perform ' +
-        '"config.get": company context is required',
-    );
+    calls.count += 1;
+    return orig();
   }) as typeof harness.ctx.config.get;
+  return calls;
 }
 
 function makeHarness(config: Record<string, unknown> = {}) {
@@ -55,31 +60,32 @@ function makeHarness(config: Record<string, unknown> = {}) {
   return harness;
 }
 
-describe("boot: setup-time config.get denial is not fatal", () => {
-  it("createKlipperWorker resolves when config.get is denied (no boot death)", async () => {
+describe("boot: setup makes no config read (poisoning-safe)", () => {
+  it("createKlipperWorker never calls ctx.config.get at spawn (no boot death)", async () => {
     const harness = makeHarness();
-    denySetupConfigRead(harness);
+    const reads = countConfigReads(harness);
 
-    // Under the pre-fix code this await REJECTED with the authz denial and
-    // the host marked the plugin error with no worker process at all.
     const worker = await createKlipperWorker(harness.ctx, { autoStart: false });
 
+    // THE boot contract: zero worker→host config reads outside dispatches.
+    // (The pre-fix code made a best-effort setup read that the host denied
+    // in service scope — and that denial permanently poisoned the method.)
+    expect(reads.count).toBe(0);
     expect(worker.client).toBeNull();
     expect(worker.configKnown).toBe(false);
-    // The denial warn is a documented boot contract (operators grep for it).
+    // The boot log line is a documented contract (operators grep for it).
     expect(
       harness.logs.some(
         (e) =>
-          e.level === "warn" &&
-          e.message.includes("config.get denied") &&
-          e.message.includes("waiting for the host config replay"),
+          e.level === "info" &&
+          e.message.includes("booted without a config read"),
       ),
     ).toBe(true);
   });
 
   it("all three manifest tools stay registered after a denied boot read", async () => {
     const harness = makeHarness();
-    denySetupConfigRead(harness);
+    const reads = countConfigReads(harness);
     await createKlipperWorker(harness.ctx, { autoStart: false });
 
     for (const tool of [
@@ -101,7 +107,7 @@ describe("boot: setup-time config.get denial is not fatal", () => {
 
   it("config data key reports unconfigured while the replay is pending", async () => {
     const harness = makeHarness();
-    denySetupConfigRead(harness);
+    const reads = countConfigReads(harness);
     await createKlipperWorker(harness.ctx, { autoStart: false });
     const cfg = await harness.getData<{ configured: boolean; moonrakerBaseUrl: string | null }>(
       "config",
@@ -113,12 +119,15 @@ describe("boot: setup-time config.get denial is not fatal", () => {
 describe("boot: host config replay via onConfigChanged", () => {
   it("plugin.setup survives the denied read; onConfigChanged starts the client", async () => {
     const harness = makeHarness();
-    denySetupConfigRead(harness);
+    const reads = countConfigReads(harness);
 
     // VITEST is set, so setup's autoStart is disabled — no real WS dial.
     await plugin.definition.setup(harness.ctx);
+    expect(reads.count).toBe(0);
     expect(
-      harness.logs.some((e) => e.level === "warn" && e.message.includes("config.get denied")),
+      harness.logs.some(
+        (e) => e.level === "info" && e.message.includes("booted without a config read"),
+      ),
     ).toBe(true);
 
     // The loader replays the stored row right after boot.
@@ -138,7 +147,7 @@ describe("boot: host config replay via onConfigChanged", () => {
 
   it("onHealth distinguishes replay-pending from connected", async () => {
     const harness = makeHarness();
-    denySetupConfigRead(harness);
+    const reads = countConfigReads(harness);
     await plugin.definition.setup(harness.ctx);
 
     const before = await plugin.definition.onHealth!();
@@ -153,7 +162,7 @@ describe("boot: host config replay via onConfigChanged", () => {
 
   it("an identical replay burst converges on one client (no churn)", async () => {
     const harness = makeHarness();
-    denySetupConfigRead(harness);
+    const reads = countConfigReads(harness);
     const worker = await createKlipperWorker(harness.ctx, { autoStart: false });
 
     await worker.applyConfig({ ...BASE_CONFIG }, "configChanged", false);
@@ -169,7 +178,7 @@ describe("boot: host config replay via onConfigChanged", () => {
 
   it("a replay with a different connection identity replaces the client", async () => {
     const harness = makeHarness();
-    denySetupConfigRead(harness);
+    const reads = countConfigReads(harness);
     const worker = await createKlipperWorker(harness.ctx, { autoStart: false });
 
     await worker.applyConfig({ ...BASE_CONFIG }, "configChanged", false);
@@ -191,7 +200,7 @@ describe("boot: host config replay via onConfigChanged", () => {
 
   it("gate-flag-only replays keep the live client (no rebuild)", async () => {
     const harness = makeHarness();
-    denySetupConfigRead(harness);
+    const reads = countConfigReads(harness);
     const worker = await createKlipperWorker(harness.ctx, { autoStart: false });
 
     await worker.applyConfig({ ...BASE_CONFIG }, "configChanged", false);
@@ -208,7 +217,7 @@ describe("boot: host config replay via onConfigChanged", () => {
 
   it("a replay with an invalid baseUrl stops the client and degrades permissively", async () => {
     const harness = makeHarness();
-    denySetupConfigRead(harness);
+    const reads = countConfigReads(harness);
     const worker = await createKlipperWorker(harness.ctx, { autoStart: false });
 
     await worker.applyConfig({ ...BASE_CONFIG }, "configChanged", false);
@@ -231,7 +240,7 @@ describe("boot: host config replay via onConfigChanged", () => {
 
   it("a replay clearing moonrakerBaseUrl stops the client", async () => {
     const harness = makeHarness();
-    denySetupConfigRead(harness);
+    const reads = countConfigReads(harness);
     const worker = await createKlipperWorker(harness.ctx, { autoStart: false });
 
     await worker.applyConfig({ ...BASE_CONFIG }, "configChanged", false);
@@ -244,7 +253,7 @@ describe("boot: host config replay via onConfigChanged", () => {
 
   it("onConfigChanged apply failures never error the worker (best-effort replay)", async () => {
     const harness = makeHarness();
-    denySetupConfigRead(harness);
+    const reads = countConfigReads(harness);
     await plugin.definition.setup(harness.ctx);
 
     // Malformed replay payload (null) — must degrade permissively, not throw.
@@ -257,10 +266,18 @@ describe("boot: host config replay via onConfigChanged", () => {
   });
 });
 
-describe("boot: permissive hosts keep the historical setup path", () => {
-  it("a readable config at setup still builds and starts the client immediately", async () => {
+describe("boot: a readable config at setup is ignored until the replay lands", () => {
+  it("even a readable config is NOT applied at setup; the replay builds the client", async () => {
     const harness = makeHarness({ ...BASE_CONFIG });
+    const reads = countConfigReads(harness);
     const worker = await createKlipperWorker(harness.ctx, { autoStart: false });
+    // setup() never reads config — there is no safe scope for it.
+    expect(reads.count).toBe(0);
+    expect(worker.configKnown).toBe(false);
+    expect(worker.client).toBeNull();
+
+    // The host replay applies it.
+    await worker.applyConfig({ ...BASE_CONFIG }, "configChanged", false);
     expect(worker.configKnown).toBe(true);
     expect(worker.client).not.toBeNull();
     const cfg = await harness.getData<{ configured: boolean }>("config");

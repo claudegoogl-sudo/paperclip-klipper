@@ -39,7 +39,7 @@ Config keys (all three required when the transport is selected):
 | --- | --- | --- |
 | `flashforgeBaseUrl` | URL | e.g. `http://192.168.1.50:8898`. Port `8898` is applied when omitted; URLs embedding credentials (userinfo) are rejected — the check code belongs in the secret-ref. All FlashForge traffic is scoped to this host (`flashforgeAllowedHosts` mirrors the moonraker allowlist). |
 | `flashforgeSerialNumber` | string | The Device ID shown in the printer's *Network > LAN Only* settings. An identifier, not a credential. |
-| `flashforgeCheckCodeRef` | secret-ref | The per-printer check code (the LAN-mode credential). Resolved per call via `ctx.secrets.resolve`; never stored or logged. |
+| `flashforgeCheckCodeRef` | secret-ref | The per-printer check code (the LAN-mode credential). Resolved by the worker once per config application (boot replay or operator save); held in worker memory only — never stored or logged. |
 
 #### Secret-reference shapes (both ref keys)
 
@@ -61,9 +61,21 @@ Config keys (all three required when the transport is selected):
   per-tenant config-overrides route answers 422 for them), so new setups
   should always use the object shape.
 
-Either way the plaintext value is resolved per call via `ctx.secrets.resolve`
-and is never stored, logged, or cached; a missing or unresolvable ref refuses
-the transport at load (fail closed — no silent fallback).
+Either way the plaintext value is resolved by the worker **once per config
+application** (the boot replay or an operator save — the host's scoped config
+push) and held in worker memory for the transport's lifetime; it is never
+stored, logged, or written to state, and the cache is refreshed at every
+config application, so a rotated secret takes effect at the next config save
+or worker restart. A missing or unresolvable ref refuses the transport at
+load (fail closed — no silent fallback).
+
+> Why not resolve per request? Worker→host RPCs that run with no dispatch in
+> flight cannot be attributed to a tenant, and the host permanently denies a
+> method after seeing one — a per-request resolve from the status poll or a
+> WebSocket reconnect would poison `secrets.resolve` for the worker's whole
+> lifetime. Resolving inside the scoped config push (and re-reading config
+> inside dispatches, where the invocation is attributed) keeps every
+> worker→host call on an attributed path.
 
 Endpoint shapes follow the printer's LAN-only HTTP API (`POST /detail`,
 `/gcodeList`, `/uploadGcode`, `/printGcode`, `/control`): JSON endpoints carry
