@@ -286,6 +286,74 @@ export async function createKlipperWorker(
     },
   };
 
+  // ── Status stream channel lifecycle ────────────────────────────────────
+  // The printer page's `usePluginStream("klipper")` only receives events
+  // while the host holds a pinned channel for STREAM_CHANNEL. The host pins
+  // a channel ONLY from a `streams.open` sent inside a host-validated
+  // dispatch (the SDK echoes the invocation id on every notification; the
+  // pin value comes from the dispatch scope, never from this worker's
+  // claim). So the channel opens where the transport loop starts — inside
+  // `ensureCredential`, with the dispatching company's id — and closes when
+  // the transport stops. Emissions keep the pre-existing path (transport
+  // callbacks → `ctx.streams.emit`); the SDK resolves the channel's
+  // companyId from the open call, and the host tenant-verifies each
+  // out-of-dispatch emit against the pin. `streams.open`/`close` are
+  // one-way notifications, not worker→host calls: they never hit the
+  // id-less-call guards.
+  //
+  // `statusChannelCompanyId` mirrors the pin the host should be holding so
+  // repeated dispatches from the same company do not re-send the
+  // notification, and so a channel that was never opened is never closed
+  // (an unpinned close would only earn a `streams.dropped` warn).
+  let statusChannelCompanyId: string | null = null;
+
+  const openStatusChannel = (companyId: string): void => {
+    if (!companyId || statusChannelCompanyId === companyId) return;
+    try {
+      ctx.streams.open(STREAM_CHANNEL, companyId);
+      statusChannelCompanyId = companyId;
+      ctx.logger.debug("klipper.stream.channel_opened", {
+        pluginId: "platform.klipper",
+        channel: STREAM_CHANNEL,
+        source: "dispatch",
+      });
+    } catch (err) {
+      ctx.logger.debug("klipper.stream.open_failed", {
+        channel: STREAM_CHANNEL,
+        error: String(err instanceof Error ? err.message : err),
+      });
+    }
+  };
+
+  const closeStatusChannel = (): void => {
+    if (statusChannelCompanyId === null) return;
+    statusChannelCompanyId = null;
+    try {
+      ctx.streams.close(STREAM_CHANNEL);
+      ctx.logger.debug("klipper.stream.channel_closed", {
+        pluginId: "platform.klipper",
+        channel: STREAM_CHANNEL,
+      });
+    } catch (err) {
+      ctx.logger.debug("klipper.stream.close_failed", {
+        channel: STREAM_CHANNEL,
+        error: String(err instanceof Error ? err.message : err),
+      });
+    }
+  };
+
+  /**
+   * Stop a transport and tear the status stream channel down with it: a
+   * stopped printer pushes no status, and the UI subscription should see
+   * the channel end instead of silently starving. Re-pinning happens at the
+   * next in-dispatch start.
+   */
+  const stopClient = (client: { stop(): void } | null): void => {
+    if (!client) return;
+    client.stop();
+    closeStatusChannel();
+  };
+
   /**
    * Config-application invalidation for a credential-bearing transport.
    * A STARTED transport is stopped and dropped — no live connection may
@@ -298,7 +366,7 @@ export async function createKlipperWorker(
     if (!client) return;
     if (transportStarted) {
       handle.client = null;
-      client.stop();
+      stopClient(client);
     } else {
       client.applyCredential(null);
     }
@@ -412,7 +480,7 @@ export async function createKlipperWorker(
         if (handle.client) {
           const old = handle.client;
           handle.client = null;
-          old.stop();
+          stopClient(old);
         }
         ctx.logger.warn(
           "paperclip-klipper rejected the transport config value — refusing to start any printer client; tool calls will return prerequisite_missing until this is fixed",
@@ -429,7 +497,7 @@ export async function createKlipperWorker(
         if (handle.client) {
           const old = handle.client;
           handle.client = null;
-          old.stop();
+          stopClient(old);
         }
         transportStarted = false;
         credentialPendingReason = null;
@@ -450,7 +518,7 @@ export async function createKlipperWorker(
         if (handle.client) {
           const old = handle.client;
           handle.client = null;
-          old.stop();
+          stopClient(old);
           ctx.logger.warn(
             "paperclip-klipper config applied without moonrakerBaseUrl — stopped the Moonraker client; tool calls return prerequisite_missing until config is set",
             { pluginId: "platform.klipper", source },
@@ -477,7 +545,7 @@ export async function createKlipperWorker(
         if (handle.client) {
           const old = handle.client;
           handle.client = null;
-          old.stop();
+          stopClient(old);
         }
         ctx.logger.warn(
           "paperclip-klipper rejected moonrakerBaseUrl — refusing to start the Moonraker client until this is fixed; tool calls will return prerequisite_missing",
@@ -508,7 +576,7 @@ export async function createKlipperWorker(
         if (handle.client) {
           const old = handle.client;
           handle.client = null;
-          old.stop();
+          stopClient(old);
           transportStarted = false;
           ctx.logger.info("klipper.connection_replaced", {
             pluginId: "platform.klipper",
@@ -590,7 +658,7 @@ export async function createKlipperWorker(
         if (handle.client) {
           const old = handle.client;
           handle.client = null;
-          old.stop();
+          stopClient(old);
         }
         ctx.logger.warn(
           "paperclip-klipper rejected the flashforge transport config — refusing to start the FlashForge client; tool calls will return prerequisite_missing until the config is completed",
@@ -669,6 +737,7 @@ export async function createKlipperWorker(
   async function ensureCredential(
     liveConfig: Partial<KlipperConfig>,
     method: string,
+    dispatchCompanyId = "",
   ): Promise<{ ok: true } | { ok: false; reason: string }> {
     const selection = selectTransport(liveConfig.transport);
     if (!selection.ok) {
@@ -728,7 +797,7 @@ export async function createKlipperWorker(
         if (handle.client) {
           const old = handle.client;
           handle.client = null;
-          old.stop();
+          stopClient(old);
           ctx.logger.info("klipper.connection_replaced", {
             pluginId: "platform.klipper",
             source: "dispatch",
@@ -760,11 +829,21 @@ export async function createKlipperWorker(
       }
       if (handle.client && !transportStarted) {
         transportStarted = true;
+        // The transport loop starts inside this dispatch — pin the status
+        // stream channel to the dispatching company so the transport's
+        // out-of-dispatch status emits attribute to it from the first
+        // snapshot on.
+        openStatusChannel(dispatchCompanyId);
         void handle.client.start().catch((err) => {
           ctx.logger.warn("klipper.ws.initial_connect_failed", {
             error: String(err instanceof Error ? err.message : err),
           });
         });
+      } else if (transportStarted) {
+        // Already running from an earlier dispatch: re-point the pin when
+        // the dispatching company changed (the SDK's channel→company map
+        // feeds every later emit, and the host re-pins on a verified open).
+        openStatusChannel(dispatchCompanyId);
       }
       return { ok: true };
     }
@@ -796,6 +875,9 @@ export async function createKlipperWorker(
       credentialPendingReason = null;
       if (!transportStarted) {
         transportStarted = true;
+        // Transport start inside this dispatch — pin the status stream
+        // channel to the dispatching company (see the unauth branch note).
+        openStatusChannel(dispatchCompanyId);
         // TS cannot narrow `handle.client` through the `identityMatches`
         // thunk, so this stays optional-chained (the fast-path condition
         // guarantees a client of the selected kind exists).
@@ -808,6 +890,11 @@ export async function createKlipperWorker(
         }
         // flashforge: the applyCredential(code) that cached the value
         // already (re)started the poll loop.
+      } else {
+        // Already running: re-point the pin when the dispatching company
+        // changed (identical-connection-identity configs from two companies
+        // reuse the held client; the status stream follows the dispatch).
+        openStatusChannel(dispatchCompanyId);
       }
       return { ok: true };
     }
@@ -881,7 +968,7 @@ export async function createKlipperWorker(
       if (handle.client) {
         const old = handle.client;
         handle.client = null;
-        old.stop();
+        stopClient(old);
       }
       transportStarted = false;
       handle.client =
@@ -918,6 +1005,11 @@ export async function createKlipperWorker(
     credentialPendingReason = null;
     if (!transportStarted && active) {
       transportStarted = true;
+      // Transport start inside this dispatch — pin the status stream
+      // channel to the dispatching company so the transport's
+      // out-of-dispatch status emits attribute to it from the first
+      // snapshot on.
+      openStatusChannel(dispatchCompanyId);
       if (!(selection.kind === "flashforge" && reusable)) {
         // flashforge: applyCredential(code) already (re)started the poll
         // loop; a second start() here would double-fire the first poll.
@@ -928,6 +1020,11 @@ export async function createKlipperWorker(
           });
         });
       }
+    } else if (active && transportStarted) {
+      // Already running: re-point the pin when the dispatching company
+      // changed (identical-connection-identity configs from two companies
+      // reuse the held client; the status stream follows the dispatch).
+      openStatusChannel(dispatchCompanyId);
     }
     ctx.logger.info("klipper.credential_resolved_in_dispatch", {
       pluginId: "platform.klipper",

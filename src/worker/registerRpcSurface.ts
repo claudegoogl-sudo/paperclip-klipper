@@ -135,6 +135,13 @@ export interface RpcSurfaceOptions {
   ensureCredential?: (
     liveConfig: Partial<KlipperConfig>,
     method: string,
+    /**
+     * Company id of the CURRENT dispatch (from the handler's `runCtx`) —
+     * the status stream channel is (re)pinned to this company while the
+     * transport starts in-dispatch. The host re-derives the pin from the
+     * echoed invocation scope, never from this value.
+     */
+    dispatchCompanyId?: string,
   ) => Promise<CredentialResolution>;
   /** Emit a status snapshot to the UI stream channel used by `usePluginStream`. */
   emitStreamSnapshot?: (snapshot: MoonrakerStatusSnapshot) => void;
@@ -867,7 +874,11 @@ export function registerRpcSurface(
         // printer online.
         let active = client;
         if (options.ensureCredential) {
-          const cred = await options.ensureCredential(liveConfig, "upload_gcode");
+          const cred = await options.ensureCredential(
+            liveConfig,
+            "upload_gcode",
+            runCtx.companyId,
+          );
           if (!cred.ok) {
             return { error: `upload_gcode: refused — ${cred.reason}` };
           }
@@ -877,6 +888,16 @@ export function registerRpcSurface(
         }
         // The host resolves the attachment under the dispatching agent's
         // identity; the worker never receives inline bytes on this path.
+        // `artifacts` is typed optional on the current SDK generation: hosts
+        // older than the injection behavior dispatch tools WITHOUT the
+        // client, and dereferencing it here would crash the handler with a
+        // TypeError instead of a reportable tool refusal.
+        if (!runCtx.artifacts) {
+          return {
+            error:
+              "upload_gcode: refused — the host did not provide the artifacts client for this dispatch (host upgrade required for artifact uploads)",
+          };
+        }
         const artifact = await runCtx.artifacts.fetch(artifactId);
         return await uploadGcodeCore({
           ctx,
@@ -913,7 +934,7 @@ export function registerRpcSurface(
         additionalProperties: false,
       },
     },
-    async (params): Promise<ToolResult> => {
+    async (params, runCtx): Promise<ToolResult> => {
       const client = options.getClient();
       if (!client) return prerequisiteMissingToolResult(prereqMessage);
       // Re-read config live on every dispatch — never gate off the value
@@ -946,7 +967,11 @@ export function registerRpcSurface(
         // never spends a resolve.
         let active = client;
         if (options.ensureCredential) {
-          const cred = await options.ensureCredential(liveConfig, "start_print");
+          const cred = await options.ensureCredential(
+            liveConfig,
+            "start_print",
+            runCtx.companyId,
+          );
           if (!cred.ok) {
             return { error: `start_print: refused — ${cred.reason}` };
           }
