@@ -39,7 +39,7 @@ Config keys (all three required when the transport is selected):
 | --- | --- | --- |
 | `flashforgeBaseUrl` | URL | e.g. `http://192.168.1.50:8898`. Port `8898` is applied when omitted; URLs embedding credentials (userinfo) are rejected — the check code belongs in the secret-ref. All FlashForge traffic is scoped to this host (`flashforgeAllowedHosts` mirrors the moonraker allowlist). |
 | `flashforgeSerialNumber` | string | The Device ID shown in the printer's *Network > LAN Only* settings. An identifier, not a credential. |
-| `flashforgeCheckCodeRef` | secret-ref | The per-printer check code (the LAN-mode credential). Resolved by the worker once per config application (boot replay or operator save); held in worker memory only — never stored or logged. |
+| `flashforgeCheckCodeRef` | secret-ref | The per-printer check code (the LAN-mode credential). Resolved by the worker INSIDE the first tool dispatch that needs it; held in worker memory only — never stored or logged. Before that first dispatch the transport is dormant and status/health report "credential not resolved yet". |
 
 #### Secret-reference shapes (both ref keys)
 
@@ -61,21 +61,34 @@ Config keys (all three required when the transport is selected):
   per-tenant config-overrides route answers 422 for them), so new setups
   should always use the object shape.
 
-Either way the plaintext value is resolved by the worker **once per config
-application** (the boot replay or an operator save — the host's scoped config
-push) and held in worker memory for the transport's lifetime; it is never
-stored, logged, or written to state, and the cache is refreshed at every
-config application, so a rotated secret takes effect at the next config save
-or worker restart. A missing or unresolvable ref refuses the transport at
-load (fail closed — no silent fallback).
+Either way the plaintext value is resolved by the worker **inside the first
+tool dispatch that needs it** (`klipper.upload_gcode` / `klipper.start_print`)
+and held in worker memory, keyed to the config fingerprint that produced it;
+it is never stored, logged, or written to state. Every config application
+(boot replay or operator save) invalidates the cache, so a rotated secret
+takes effect at the next dispatch. A ref that cannot be resolved fails the
+dispatch with a clear "credential not resolved yet" reason and the transport
+stays dormant (fail closed — no silent fallback, no unauthenticated request).
 
-> Why not resolve per request? Worker→host RPCs that run with no dispatch in
-> flight cannot be attributed to a tenant, and the host permanently denies a
-> method after seeing one — a per-request resolve from the status poll or a
-> WebSocket reconnect would poison `secrets.resolve` for the worker's whole
-> lifetime. Resolving inside the scoped config push (and re-reading config
-> inside dispatches, where the invocation is attributed) keeps every
-> worker→host call on an attributed path.
+**Fail-closed idle.** Until the first credentialed dispatch, a ref-bearing
+transport stays DORMANT: no WebSocket, no status poll, no request leaves the
+process. The status data key, the `klipper.get_printer_status` tool, and the
+health report all say `credential not resolved yet` during that window — an
+observable degraded state, not a misleading gate error. Background
+resolution (UI actions, the status poll, WS reconnects) is deliberately
+unsupported on this SDK generation; resolving there is exactly what the
+attribution rules forbid (see below).
+
+> Why not resolve at config-apply or per request? Worker→host RPCs that run
+> with no (or with several concurrent) invocations in flight cannot be
+> attributed to a tenant, and the host permanently denies a method after
+> seeing an unattributable one. The activation config replay delivers rows
+> back-to-back while the plugin's apply runs async to the push, so an
+> apply-time resolve lands unattributed and is denied — observed live, on
+> every row, during plugin activation. The ONE reliably attributed context
+> for this worker class is an in-flight tool dispatch, so the credential
+> resolves there; config re-reads for the opt-in gates ride the same
+> attributed path.
 
 Endpoint shapes follow the printer's LAN-only HTTP API (`POST /detail`,
 `/gcodeList`, `/uploadGcode`, `/printGcode`, `/control`): JSON endpoints carry
@@ -119,6 +132,64 @@ files; starting a print stays an operator action):
   `print_stats.state` values (`ready`→`standby`, `printing`, `pause`→`paused`,
   `completed`→`complete`, …).
 
+### Live camera section (Creator 5)
+
+The printer page gains a **camera section** when `flashforgeCameraBaseUrl` is
+set (e.g. `http://192.168.1.50:8080`, the printer's MJPG-Streamer endpoint):
+
+- **Pull delivery.** Frames are fetched by the page from the worker over the
+  authenticated actions bridge (`camera_open` / `camera_next` /
+  `camera_retry`, ~2 fps) — not pushed over SSE. This host generation drops
+  worker stream emissions made outside a dispatch, so the actions bridge is
+  the only reliable authenticated surface.
+- **Board-only.** The printer's camera endpoint authenticates nothing, so
+  the worker is the trust boundary: `camera_open` / `camera_next` /
+  `camera_retry` refuse agent keys outright (`camera_close` is safe for any
+  actor). Frames render on the page and go nowhere else — never to agent
+  tools, data keys, or logs.
+- **One upstream, keep-latest.** The worker holds a single MJPG connection
+  (the printer's camera is single-viewer) and a one-frame buffer: a slow
+  viewer re-reads an older frame, frames in between are dropped. Memory is
+  capped per feed (one frame + one parse buffer).
+- **Hostile-stream fail-closed bounds.** Any frame over 512 KB or a
+  SOI-less prefix over 1 MB aborts the upstream immediately and counts
+  toward reconnect backoff.
+- **Idle self-release.** The feed opens when the section becomes visible,
+  stays warm while it is polled, and closes itself after 20 s without
+  viewer activity (tab hidden also closes it) — freeing the printer's
+  single-viewer slot for everyone else.
+- **Reconnect discipline.** Upstream failures back off exponentially
+  (1 s base, 30 s cap, jittered) and go terminally `failed` after 6
+  consecutive failures; the page then offers an explicit **Retry camera**
+  button (`camera_retry`). A stale-frame banner (frame older than 2.5 s)
+  replaces the live image rather than ever presenting a frozen frame as
+  live.
+- **URL scoping.** `flashforgeCameraBaseUrl` validates like the transports
+  (http(s)-only, no userinfo, host allowlist defaulting to the FlashForge
+  host — `flashforgeCameraAllowedHosts` overrides) and is additionally
+  pinned to exactly `/?action=stream`; the scope is re-checked at connect
+  time. Omitting the key disables the camera section; the transports run
+  unchanged.
+
+### Actions and actor gating (conditions C4/C5)
+
+The actions bridge authenticates board users AND agent API keys, and the
+worker gates by actor type:
+
+- **Board users keep tap-to-consent** — pressing a button on the page is
+  the consent signal. All actions work for board users regardless of the
+  agent flags.
+- **Agent keys are gated on the same live-config flags the tools use**,
+  re-read per dispatch and failing closed on read errors:
+  `start_print` / `pause_print` / `resume_print` / `cancel_print` require
+  `allow_agent_initiated_print: true`; `delete_file` and the new
+  `upload_gcode` action require `auto_upload_artifacts: true`.
+- **`upload_gcode` action** backs the page's file picker and shares the
+  tool's entire policy pipeline as code (same `uploadGcodeCore`): filename
+  and path backstops, the gunzip bomb guard, and the transport upload.
+  The inline base64 payload is capped at 16 MB encoded (12 MB decoded)
+  before any decode allocation.
+
 ## Boot-time config (host replay semantics)
 
 The Paperclip host spawns plugin workers with an **empty bootstrap config** and
@@ -135,12 +206,16 @@ This plugin treats that denial as **config unknown, not boot failure**:
   the wait (`waiting for the host config replay`).
 - `onConfigChanged` (the host replay and every operator config save) applies
   the snapshot in-process and starts/stops the active transport's client
-  (Moonraker WebSocket or FlashForge poll) without a worker restart.
+  (Moonraker WebSocket or FlashForge poll) without a worker restart. The
+  application itself makes ZERO worker→host calls (no `config.get`, no
+  `secrets.resolve`) and converges ref-bearing transports DORMANT.
   Application is idempotent by connection identity
-  (transport + baseUrl + allowlist + credential ref), so
-  the per-company replay burst at boot converges on one client; gate-flag-only
-  changes never rebuild the transport; an absent or invalid `moonrakerBaseUrl`
-  degrades back to permissive init instead of crashing the worker.
+  (transport + baseUrl + allowlist + credential ref), so the per-company
+  replay burst at boot converges on one dormant client; an unauthenticated
+  Moonraker (no ref) starts immediately as before; an absent or invalid
+  `moonrakerBaseUrl` degrades back to permissive init instead of crashing
+  the worker. Every application invalidates the credential cache, so a
+  rotated secret lands at the next credentialed dispatch.
 - `onHealth` reports `configKnown` / `clientActive` so a replay-pending boot is
   visible in the plugin health dashboard.
 
@@ -173,10 +248,12 @@ This repo vendors packed tarballs under `.paperclip-sdk/` (~300 KB total) and
 intentional so `pnpm install` works from a fresh clone without needing access
 to the upstream Paperclip checkout.
 
-Snapshot source: `@paperclipai/plugin-sdk@2026.428.1-fork.5` and
-`@paperclipai/shared@2026.428.1-fork.5`. Once these SDKs are published to npm,
-switch the `devDependencies` to the registry versions and delete
-`.paperclip-sdk/`.
+Snapshot source: `@paperclipai/plugin-sdk@2026.916.1` and
+`@paperclipai/shared@2026.916.1`, packed from the published npm artifacts
+(`npm pack <pkg>@<version>` inside `.paperclip-sdk/`). The snapshot is
+refreshed when a plugin needs an SDK capability the vendored copy predates
+(e.g. actor-context delivery to action handlers); keep the tarballs pinned to
+exact versions so installs stay byte-reproducible.
 
 ## Install Into a Running Paperclip Server (alternative)
 

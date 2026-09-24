@@ -229,6 +229,28 @@ const manifest: PaperclipPluginManifestV1 = {
           "worker restart. A missing/unresolvable ref refuses the transport " +
           "at load (fail closed).",
       },
+      flashforgeCameraBaseUrl: {
+        type: "string",
+        format: "uri",
+        description:
+          "Optional: the printer camera's MJPG-Streamer base URL for the " +
+          "printer page's live camera section (e.g. " +
+          "http://192.168.1.50:8080). The worker serves frames ONLY through " +
+          "authenticated board actions (agent keys are refused) and the " +
+          "URL is scoped to exactly /?action=stream. http(s) only; URLs " +
+          "embedding credentials (userinfo) are rejected. Omit to disable " +
+          "the camera section entirely; the printer transports run " +
+          "unchanged without it.",
+      },
+      flashforgeCameraAllowedHosts: {
+        type: "array",
+        items: { type: "string" },
+        minItems: 1,
+        description:
+          "Optional host allowlist for flashforgeCameraBaseUrl. Defaults " +
+          "to the FlashForge printer host (or the camera URL's own host " +
+          "when no FlashForge transport is configured).",
+      },
       auto_upload_artifacts: {
         type: "boolean",
         default: false,

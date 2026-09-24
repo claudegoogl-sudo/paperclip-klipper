@@ -21,7 +21,7 @@
  *      config is absent or invalid — never crash the worker.
  */
 import { describe, expect, it } from "vitest";
-import { createTestHarness } from "@paperclipai/plugin-sdk/testing";
+import { createRunCtxAwareHarness } from "../helpers/runCtxAwareHarness.js";
 import manifest from "../../src/manifest.js";
 import plugin, { createKlipperWorker } from "../../src/worker.js";
 
@@ -41,7 +41,7 @@ const BASE_CONFIG = { moonrakerBaseUrl: "http://printer.lan:7125" };
  * the method on real hosts), so every test in this file can assert the
  * counter stays at zero until a dispatch-driven read happens.
  */
-function countConfigReads(harness: ReturnType<typeof createTestHarness>) {
+function countConfigReads(harness: ReturnType<typeof createRunCtxAwareHarness>) {
   const calls = { count: 0 };
   const orig = harness.ctx.config.get.bind(harness.ctx.config.get);
   harness.ctx.config.get = (async () => {
@@ -52,7 +52,7 @@ function countConfigReads(harness: ReturnType<typeof createTestHarness>) {
 }
 
 function makeHarness(config: Record<string, unknown> = {}) {
-  const harness = createTestHarness({
+  const harness = createRunCtxAwareHarness({
     manifest,
     capabilities: [...CAPABILITIES],
     config,
@@ -112,7 +112,7 @@ describe("boot: setup makes no config read (poisoning-safe)", () => {
     const cfg = await harness.getData<{ configured: boolean; moonrakerBaseUrl: string | null }>(
       "config",
     );
-    expect(cfg).toEqual({ configured: false, moonrakerBaseUrl: null });
+    expect(cfg).toEqual({ configured: false, moonrakerBaseUrl: null, cameraConfigured: false });
   });
 });
 

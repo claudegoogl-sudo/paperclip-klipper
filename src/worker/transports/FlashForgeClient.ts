@@ -93,6 +93,28 @@ export class FlashForgeOutboundScopeError extends Error {
   }
 }
 
+/**
+ * Thrown when a credential-carrying request is attempted while the
+ * configured check-code ref has not been resolved yet. The worker resolves
+ * credentials lazily INSIDE tool dispatches (dispatch attribution is the
+ * only reliable authorization path for this id-less worker class), so the
+ * client is constructed DORMANT and stays that way until the first
+ * dispatch resolves the ref and calls `applyCredential(code)`. Anything
+ * that touches the network before that fails closed with this error —
+ * never a wire request with missing or placeholder credential material,
+ * and never a worker→host `secrets.resolve` from a background path.
+ */
+export class FlashForgeCredentialPendingError extends Error {
+  constructor(message = CREDENTIAL_PENDING_MESSAGE) {
+    super(message);
+    this.name = "FlashForgeCredentialPendingError";
+  }
+}
+
+/** User-safe reason surfaced while the transport waits for its credential. */
+export const CREDENTIAL_PENDING_MESSAGE =
+  "credential not resolved yet — the transport starts on the first tool dispatch that needs it";
+
 export class FlashForgeApiError extends Error {
   constructor(
     /** HTTP status when the printer answered; 0 for transport failures. */
@@ -157,15 +179,17 @@ export interface FlashForgeClientOptions {
   /** Printer serial number — the LAN-mode Device ID (an identifier, not a secret). */
   serialNumber: string;
   /**
-   * PRE-RESOLVED per-printer check code credential. The worker resolves the
-   * configured ref once per config application — inside the host's scoped
-   * `configChanged` push — and fails closed (no client is constructed) when
-   * resolution fails, so a FlashForgeClient never exists without a
-   * credential. Held in memory only; never logged, never persisted. Use
-   * `applyCredential()` to swap in a freshly resolved value on config
-   * re-application.
+   * Per-printer check code credential, or `null` while the configured ref
+   * has not been resolved yet. The worker resolves the ref lazily INSIDE
+   * the first tool dispatch that needs it (dispatch attribution is the one
+   * authorization path this worker class can rely on) and pushes the
+   * plaintext here via `applyCredential()`. While `null` the client is
+   * DORMANT: no request leaves the process (every credential-carrying path
+   * guards on this value), the poll loop does not run, and status/health
+   * report "credential not resolved yet". Held in memory only; never
+   * logged, never persisted.
    */
-  checkCode: string;
+  checkCode: string | null;
   http: PluginHttpClient;
   logger: PluginLogger;
   /** Status poll interval while started. Default 10s. */
@@ -285,8 +309,8 @@ export class FlashForgeClient implements PrinterTransport {
 
   private readonly baseUrl: URL;
   private readonly serialNumber: string;
-  /** Pre-resolved check code; swapped atomically on config re-application. */
-  private checkCode: string;
+  /** Resolved check code, or `null` while pending in-dispatch resolution. */
+  private checkCode: string | null;
   private readonly http: PluginHttpClient;
   private readonly logger: PluginLogger;
   private readonly pollIntervalMs: number;
@@ -417,7 +441,7 @@ export class FlashForgeClient implements PrinterTransport {
     parts.push(`--${boundary}--${CRLF}`);
     const body = parts.join("");
 
-    const checkCode = this.checkCodeCredential();
+    const checkCode = this.requireCredential();
     const headers: Record<string, string> = {
       "Content-Type": `multipart/form-data; boundary=${boundary}`,
       // Header names/expected values mirror the reference client's upload.
@@ -507,6 +531,12 @@ export class FlashForgeClient implements PrinterTransport {
     if (this.stopped) {
       throw new Error("FlashForgeClient.start() called after stop()");
     }
+    if (this.checkCode === null) {
+      // Dormant (credential not resolved yet): never touch the network.
+      // `applyCredential(code)` starts the loop when the credential lands.
+      this.setConnectionState({ state: "idle", attempts: 0 });
+      return;
+    }
     if (this.pollHandle) return;
     this.setConnectionState({ state: "connecting" });
     // First poll runs immediately; scheduleNext continues the loop unless
@@ -526,6 +556,11 @@ export class FlashForgeClient implements PrinterTransport {
   async retryConnection(): Promise<void> {
     if (this.stopped) {
       throw new Error("FlashForgeClient.retryConnection() called after stop()");
+    }
+    if (this.checkCode === null) {
+      // A retry cannot conjure a credential — only a tool dispatch can
+      // resolve one. Surface the reason instead of a confusing auth failure.
+      throw new FlashForgeCredentialPendingError();
     }
     if (this.pollHandle) return;
     this.setConnectionState({ state: "connecting", attempts: 0 });
@@ -550,6 +585,16 @@ export class FlashForgeClient implements PrinterTransport {
    * timeout / 5xx / non-JSON / error-envelope outcomes. Never throws.
    */
   async probeHealth(): Promise<TransportHealthReport> {
+    if (this.checkCode === null) {
+      // Fail closed without touching the network: a probe cannot
+      // authenticate without the credential, and a "refused" answer from
+      // the printer would mask the real reason.
+      return {
+        reachable: false,
+        message: CREDENTIAL_PENDING_MESSAGE,
+        details: { transport: "flashforge", credentialPending: true },
+      };
+    }
     try {
       const detail = await this.withTimeout(this.fetchDetail(), this.probeTimeoutMs);
       const rawState = typeof detail.status === "string" ? detail.status : "unknown";
@@ -590,23 +635,51 @@ export class FlashForgeClient implements PrinterTransport {
   }
 
   /**
-   * In-memory check code read. NEVER a worker→host call: resolution moved
-   * to the worker's config-apply path so the status poll / health probes /
-   * UI data keys cannot fire an unscoped `secrets.resolve` RPC (which the
-   * host attributes single-in-flight and permanently denies when nothing is
-   * in flight). Never logged.
+   * In-memory check code read for credential-carrying paths. NEVER a
+   * worker→host call: resolution lives in the worker's DISPATCH path
+   * (dispatch attribution authorizes `secrets.resolve`; a resolve from the
+   * status poll / health probe / UI data key would be id-less with nothing
+   * in flight and permanently poison the method). While the ref is
+   * unresolved (`null`) this throws instead of sending a request — the
+   * pending error is the fail-closed answer to "reach the printer without
+   * a credential". Never logged.
    */
-  private checkCodeCredential(): string {
+  private requireCredential(): string {
+    if (this.checkCode === null) {
+      throw new FlashForgeCredentialPendingError();
+    }
     return this.checkCode;
   }
 
   /**
-   * Swap in a freshly resolved credential (worker config re-application).
-   * Applies to every subsequent request; in-flight requests keep the value
-   * they already captured. The plaintext is never logged by this method.
+   * Swap the credential the worker holds for this transport.
+   *
+   * `null` fails closed: the poll loop is stopped (no request can carry a
+   * credential the current config application has not authorized) and the
+   * state drops to idle — status surfaces report the worker-level
+   * "credential not resolved yet" reason. Applies on EVERY config
+   * application (the worker invalidates its resolution cache), so a
+   * rotated secret is picked up at the next in-dispatch resolution.
+   *
+   * A non-null value starts (or restarts) the poll loop when the client is
+   * live and not already polling — that is the in-dispatch resolution path
+   * bringing the transport up. The plaintext is never logged here.
    */
-  applyCredential(credential: string): void {
+  applyCredential(credential: string | null): void {
     this.checkCode = credential;
+    if (credential === null) {
+      if (this.pollHandle) {
+        this.clearTimeoutFn(this.pollHandle);
+        this.pollHandle = null;
+      }
+      this.setConnectionState({ state: "idle", attempts: 0 });
+      return;
+    }
+    if (!this.stopped && !this.pollHandle) {
+      // Fire-and-forget: the first poll runs in the background; request
+      // failures advance the normal reconnecting/failed state machine.
+      void this.start().catch(() => undefined);
+    }
   }
 
   /**
@@ -614,7 +687,7 @@ export class FlashForgeClient implements PrinterTransport {
    * client). Bodies are never logged — they carry the check code.
    */
   private async requestJson<T>(path: string, extraBody?: Record<string, unknown>): Promise<T> {
-    const checkCode = this.checkCodeCredential();
+    const checkCode = this.requireCredential();
     const url = this.scopedUrl(path);
     const body = JSON.stringify({
       serialNumber: this.serialNumber,

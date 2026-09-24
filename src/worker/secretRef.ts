@@ -146,6 +146,17 @@ export function normalizedSecretRef(ref: SecretRef): SecretRef {
 export async function resolveSecretRef(
   secrets: PluginSecretsClient,
   ref: SecretRef,
+  runId?: string,
 ): Promise<string> {
-  return secrets.resolve(ref as string);
+  // fork51-generation SDK types `resolve(secretRef, runId)`. This worker's
+  // config-apply path has no dispatch runId (the host replay is not a tool
+  // dispatch), and fork51 hosts deny runId-less resolutions — the credential
+  // timing fix that moves resolution into a dispatch scope is tracked
+  // separately and will pass the dispatching runId here. The cast keeps the
+  // call site compiling against both SDK generations without changing
+  // behavior.
+  return (secrets.resolve as unknown as (secretRef: string, runId?: string) => Promise<string>)(
+    ref as string,
+    runId,
+  );
 }

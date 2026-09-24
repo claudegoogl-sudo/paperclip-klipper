@@ -79,7 +79,8 @@ describe("manifest ↔ worker tool contract", () => {
   registerRpcSurface(stubCtx, {
     config,
     // Cast: registration path never dereferences the client; see comment above.
-    client: buildStubClient() as Parameters<typeof registerRpcSurface>[1]["client"],
+    getClient: () => buildStubClient() as never,
+    camera: null,
   });
 
   const manifestToolNames = new Set(manifest.tools?.map((t) => t.name) ?? []);

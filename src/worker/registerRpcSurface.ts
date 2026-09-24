@@ -14,7 +14,13 @@
  * banner without an extra round-trip.
  */
 import { gunzipSync } from "node:zlib";
-import type { PluginContext, ToolResult } from "@paperclipai/plugin-sdk";
+import type {
+  PluginContext,
+  PluginPerformActionContext,
+  ToolResult,
+  ToolRunContext,
+} from "@paperclipai/plugin-sdk";
+import { CameraFeed } from "./camera/CameraFeed.js";
 import {
   MoonrakerHttpError,
   MoonrakerOutboundScopeError,
@@ -22,9 +28,13 @@ import {
   type MoonrakerStatusSnapshot,
 } from "./MoonrakerClient.js";
 import {
+  CREDENTIAL_PENDING_MESSAGE,
   FlashForgeApiError,
+  FlashForgeCredentialPendingError,
   FlashForgeOutboundScopeError,
 } from "./transports/FlashForgeClient.js";
+import { validateFlashForgeConfig } from "./transports/validateTransportConfig.js";
+import { validateMoonrakerBaseUrl } from "./validateMoonrakerBaseUrl.js";
 import type { PrinterTransport } from "./transports/PrinterTransport.js";
 import type { SecretRef } from "./secretRef.js";
 
@@ -77,24 +87,65 @@ export interface KlipperConfig {
    * the ref only).
    */
   flashforgeCheckCodeRef?: SecretRef;
+  /**
+   * Optional camera section upstream (the printer's MJPG-Streamer
+   * endpoint). Validated like the transport config (http(s)-only, no
+   * userinfo, host allowlist defaulting to the single FlashForge host) and
+   * additionally scoped to exactly /?action=stream — see
+   * ./camera/validateCameraConfig.ts. Absent = camera section renders
+   * "not configured"; the transports run unchanged without it.
+   */
+  flashforgeCameraBaseUrl?: string;
+  /** Optional host allowlist for flashforgeCameraBaseUrl. */
+  flashforgeCameraAllowedHosts?: string[];
   auto_upload_artifacts?: boolean;
   allow_agent_initiated_print?: boolean;
 }
 
+/** Result of the worker's lazy in-dispatch credential resolution. */
+export type CredentialResolution =
+  | { ok: true }
+  | { ok: false; reason: string };
+
 export interface RpcSurfaceOptions {
   config: KlipperConfig;
   /**
-   * Printer transport (Moonraker or FlashForge), or `null` when the worker
-   * started without usable transport config. When `null`, every handler
-   * short-circuits with a `prerequisite_missing` result rather than
-   * dereferencing the client. See the permissive-init pattern (matches the
-   * CAD plugin).
+   * Read the CURRENT printer transport. Handlers MUST NOT pin the client
+   * at registration time: an in-dispatch credential resolution can
+   * converge (replace) the client object while a dispatch is in flight,
+   * and the stale object must never be used for the actual tool call.
+   * `null` = the worker started without usable transport config; handlers
+   * short-circuit with a `prerequisite_missing` result (permissive-init
+   * pattern, matches the CAD plugin).
    */
-  client: PrinterTransport | null;
+  getClient: () => PrinterTransport | null;
+  /**
+   * Why the transport is not running yet ("credential not resolved
+   * yet"), or `null`. Merged into the status surfaces so the fail-closed
+   * idle state is observable instead of a misleading gate error.
+   */
+  getDegradedReason?: () => string | null;
+  /**
+   * Resolve the configured credential ref lazily INSIDE a tool dispatch
+   * (authorized by dispatch attribution), cache the plaintext in memory,
+   * inject it into the transport and start it. Called by the tool
+   * handlers that need a live transport; data keys / actions NEVER call
+   * it (they run outside dispatches and must not fire worker→host calls).
+   */
+  ensureCredential?: (
+    liveConfig: Partial<KlipperConfig>,
+    method: string,
+  ) => Promise<CredentialResolution>;
   /** Emit a status snapshot to the UI stream channel used by `usePluginStream`. */
   emitStreamSnapshot?: (snapshot: MoonrakerStatusSnapshot) => void;
   /** Emit a connection-state event to the UI stream channel. */
   emitStreamConnection?: (state: ConnectionStateSnapshot) => void;
+  /**
+   * Camera feed (single upstream MJPG connection + keep-latest buffer), or
+   * `null` when the camera is not configured / failed validation. Camera
+   * actions short-circuit with `prerequisite_missing` when null.
+   */
+  camera: CameraFeed | null;
   /**
    * Decompressed-g-code cap enforced during gunzip of gzip-magic artifacts in
    * `klipper.upload_gcode`. Defaults to {@link MAX_INFLATED_GCODE_BYTES}; tests
@@ -165,6 +216,17 @@ const UPLOAD_PATH_PATTERN =
 const UPLOAD_FILENAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}\.gcode$/;
 
 /**
+ * Hard cap on the base64-encoded payload accepted by the `upload_gcode`
+ * ACTION (the printer page file picker sends bytes inline). 16 MB of
+ * base64 decodes to 12 MB of g-code — the same order the tool path's
+ * 10 MB attachment ceiling allows through the artifact store, and far
+ * below anything the gunzip bomb guard would inflate further. Enforced on
+ * the ENCODED length before any decode, so an oversized pick fails fast
+ * without allocating the decoded buffer.
+ */
+const MAX_UPLOAD_ACTION_BASE64_BYTES = 16 * 1024 * 1024;
+
+/**
  * Return a human-readable reason the `filename` is unsafe, or `null` when it
  * is an acceptable gcode filename.
  */
@@ -228,17 +290,169 @@ async function readLiveConfig(
   }
 }
 
+/**
+ * Caller-kind gate for the mutating actions (security condition C4).
+ *
+ * The actions bridge authenticates board users AND agent API keys, and the
+ * worker is the only place that can tell them apart: the host hands every
+ * action handler a frozen context whose `actor.type` distinguishes a human
+ * board session ("user") from an agent key ("agent"). Board callers keep
+ * tap-to-consent (a human pressing the button IS the consent signal); an
+ * agent caller must additionally pass the SAME live-config opt-in flag the
+ * corresponding tool enforces — re-read inside this dispatch, failing
+ * closed on read errors — so a company agent (including one acting under
+ * prompt injection) can never reach print controls or storage mutations
+ * that bypass the tool gates.
+ */
+async function assertAgentActionGate(
+  ctx: PluginContext,
+  actionName: string,
+  context: PluginPerformActionContext | undefined,
+  gate: { flag: string; requires: boolean; what: string },
+): Promise<void> {
+  if ((context?.actor?.type ?? "system") !== "agent") return;
+  const liveConfig = await readLiveConfig(ctx, actionName);
+  const value = liveConfig[gate.flag as keyof KlipperConfig];
+  if (value !== true) {
+    throw new Error(
+      `${actionName}: ${gate.what} requires the ${gate.flag} config flag to be set to true ` +
+        "before agents may perform it (board users are unaffected).",
+    );
+  }
+  void gate.requires;
+}
+
+/**
+ * Camera actions are board-only by design (security condition C1): frames
+ * must never reach agent keys. The camera surfaces are actions (not the
+ * SSE stream bridge) because this host generation drops worker stream
+ * emissions made outside a dispatch — the actions bridge is the existing
+ * authenticated, company-scoped surface whose callers the worker can
+ * gate by actor type.
+ */
+function assertBoardActor(
+  context: PluginPerformActionContext | undefined,
+  actionName: string,
+): void {
+  if ((context?.actor?.type ?? "system") === "agent") {
+    throw new Error(
+      `${actionName}: the printer camera is restricted to board users — agent keys cannot access it.`,
+    );
+  }
+}
+
+interface UploadGcodeCoreDeps {
+  ctx: PluginContext;
+  client: PrinterTransport;
+  filename: string;
+  /** Raw g-code bytes (plain or gzip-magic — inflated by the bomb guard). */
+  bytes: Uint8Array;
+  path?: string;
+  maxInflatedGcodeBytes: number;
+  /** Log/event label so tool and action failures are distinguishable. */
+  source: "tool" | "action";
+}
+
+/**
+ * Shared upload pipeline for the klipper.upload_gcode TOOL and the
+ * upload_gcode ACTION (security condition C5): filename + path backstops,
+ * transparent gzip inflation with the bomb guard, then the transport
+ * upload. "Same policy layer" is CODE IDENTITY — the action delegates to
+ * this function rather than re-typing the gates.
+ */
+/**
+ * Filename + path backstops shared verbatim by the klipper.upload_gcode TOOL
+ * (which runs them BEFORE the in-dispatch credential resolve, so a malformed
+ * call never spends a resolve) and by {@link uploadGcodeCore} (defense at the
+ * point of upload for both caller paths). Returns the refusal ToolResult, or
+ * `null` when both targets are safe.
+ */
+function validateUploadInputs(
+  ctx: PluginContext,
+  filename: string,
+  path: string | undefined,
+  source: "tool" | "action",
+): ToolResult | null {
+  {
+    const reason = uploadFilenameError(filename);
+    if (reason !== null) {
+      ctx.logger.warn("klipper.upload_gcode.filename_rejected", { filename, reason, source });
+      return { error: `upload_gcode: refused — filename ${reason}.` };
+    }
+  }
+  if (typeof path === "string" && path.length > 0) {
+    const reason = uploadPathError(path);
+    if (reason !== null) {
+      ctx.logger.warn("klipper.upload_gcode.path_rejected", { filename, path, reason, source });
+      return { error: `upload_gcode: refused — path ${reason}.` };
+    }
+  }
+  return null;
+}
+
+async function uploadGcodeCore(deps: UploadGcodeCoreDeps): Promise<ToolResult> {
+  const { ctx, client, filename, path, maxInflatedGcodeBytes, source } = deps;
+  let { bytes } = deps;
+  {
+    const early = validateUploadInputs(ctx, filename, path, source);
+    if (early !== null) return early;
+  }
+  // Real prints only fit the 10 MB attachment store when gzipped, but the
+  // printers need plain g-code. Transparently inflate gzip-magic
+  // (0x1f 0x8b) artifacts; plain artifacts pass through untouched. The
+  // bomb guard is enforced DURING inflation via `maxOutputLength` so a
+  // malicious archive cannot balloon into memory.
+  if (bytes.length >= 2 && bytes[0] === 0x1f && bytes[1] === 0x8b) {
+    try {
+      bytes = gunzipSync(bytes, { maxOutputLength: maxInflatedGcodeBytes });
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      // ERR_BUFFER_TOO_LARGE is thrown mid-inflation once the output would
+      // cross the cap — the bomb guard fired. Any other error means the
+      // artifact carried gzip magic but was not valid gzip.
+      const bomb = code === "ERR_BUFFER_TOO_LARGE";
+      ctx.logger.warn("klipper.upload_gcode.gunzip_failed", {
+        filename,
+        gzBytes: deps.bytes.length,
+        maxInflatedGcodeBytes,
+        code,
+        bomb,
+        source,
+      });
+      return {
+        error: bomb
+          ? `upload_gcode: refused — decompressed g-code exceeds the ` +
+            `${maxInflatedGcodeBytes}-byte cap (possible gzip bomb).`
+          : `upload_gcode: refused — artifact has gzip magic but could ` +
+            `not be decompressed (${code ?? "unknown error"}).`,
+      };
+    }
+    ctx.logger.info("klipper.upload_gcode.gunzip", {
+      filename,
+      gzBytes: deps.bytes.length,
+      inflatedBytes: bytes.length,
+      source,
+    });
+  }
+  const result = await client.uploadGcode(filename, bytes, { path });
+  return { data: result };
+}
+
 export function registerRpcSurface(
   ctx: PluginContext,
   options: RpcSurfaceOptions,
 ): void {
-  const { config, client } = options;
+  const { config, camera } = options;
   const transportKind = config.transport === "flashforge" ? "flashforge" : "moonraker";
+  // "Configured" means the transport config VALIDATES (same validators the
+  // worker converges against) — a rejected value must report unconfigured,
+  // not merely "a value is present".
   const configured =
-    client !== null &&
-    (transportKind === "moonraker"
-      ? Boolean(config.moonrakerBaseUrl)
-      : Boolean(config.flashforgeBaseUrl));
+    transportKind === "moonraker"
+      ? config.moonrakerBaseUrl !== undefined &&
+        config.moonrakerBaseUrl !== "" &&
+        validateMoonrakerBaseUrl(config.moonrakerBaseUrl, config.moonrakerAllowedHosts).ok
+      : validateFlashForgeConfig(config).ok;
   const prereqMessage =
     transportKind === "flashforge"
       ? FLASHFORGE_PREREQ_MISSING_MESSAGE
@@ -258,6 +472,8 @@ export function registerRpcSurface(
       configured,
       moonrakerBaseUrl:
         configured && transportKind === "moonraker" ? config.moonrakerBaseUrl : null,
+      /** Camera section availability (validated flashforgeCameraBaseUrl). */
+      cameraConfigured: camera !== null,
     };
     if (transportKind === "flashforge") {
       return {
@@ -269,31 +485,52 @@ export function registerRpcSurface(
     return base;
   });
 
+  /**
+   * Merge the worker-level "credential not resolved yet" signal into a
+   * status snapshot. The fail-closed idle state must be OBSERVABLE — a
+   * bare stale snapshot would read like a healthy-but-idle printer.
+   */
+  const withDegradedReason = (
+    snapshot: MoonrakerStatusSnapshot,
+  ): MoonrakerStatusSnapshot & { degraded?: boolean; degradedReason?: string } => {
+    const reason = options.getDegradedReason?.() ?? null;
+    return reason === null
+      ? snapshot
+      : { ...snapshot, degraded: true, degradedReason: reason };
+  };
+
   // `usePluginData("status")` reads the cached snapshot. We do not block on
-  // a fresh /printer/info call — the WS subscription keeps the snapshot warm
-  // and the UI can call the `refresh` action to force a refetch.
+  // a fresh /printer/info call — the WS subscription / poll loop keeps the
+  // snapshot warm and the UI can call the `refresh` action to force a
+  // refetch. This surface NEVER resolves credentials (it runs outside
+  // dispatches): before the first credentialed dispatch it reports the
+  // degraded reason instead.
   ctx.data.register("status", async () => {
+    const client = options.getClient();
     if (!client) {
       return {
         connection: { state: "idle", attempts: 0, configured: false },
         objects: null,
       };
     }
-    return client.getStatusSnapshot();
+    return withDegradedReason(client.getStatusSnapshot());
   });
 
   ctx.data.register("connection", async () => {
+    const client = options.getClient();
     if (!client) return { state: "idle", attempts: 0, configured: false };
     return client.getConnectionState();
   });
 
   ctx.data.register("files", async (params: Record<string, unknown>) => {
+    const client = options.getClient();
     if (!client) return [];
     const root = typeof params.root === "string" ? params.root : "gcodes";
     return client.listFiles(root);
   });
 
   ctx.data.register("file_metadata", async (params: Record<string, unknown>) => {
+    const client = options.getClient();
     if (!client) throw prerequisiteMissingError(prereqMessage);
     const filename = typeof params.filename === "string" ? params.filename : "";
     if (!filename) throw new Error("file_metadata requires `filename`");
@@ -305,55 +542,226 @@ export function registerRpcSurface(
   // MoonrakerClient instance — no duplicated transport. When config is
   // missing they throw `prerequisite_missing` so the host surfaces a
   // structured error to the caller.
+  // NOTE: actions run OUTSIDE dispatches — they consume the client-held
+  // credential only and NEVER resolve (the client throws its
+  // "credential not resolved yet" error while the transport is dormant).
   ctx.actions.register("refresh", async () => {
+    const client = options.getClient();
     if (!client) throw prerequisiteMissingError(prereqMessage);
     const info = await client.getPrinterInfo();
     return { ok: true, info, snapshot: client.getStatusSnapshot() };
   });
 
-  ctx.actions.register("pause_print", async () => {
-    if (!client) throw prerequisiteMissingError(prereqMessage);
-    const result = await client.pausePrint();
-    return { ok: true, result };
-  });
+  ctx.actions.register(
+    "pause_print",
+    async (_params, actionCtx) => {
+      await assertAgentActionGate(ctx, "pause_print", actionCtx, {
+        flag: CONFIG_GATE_AGENT_PRINT,
+        requires: true,
+        what: "pausing a print",
+      });
+      const client = options.getClient();
+      if (!client) throw prerequisiteMissingError(prereqMessage);
+      const result = await client.pausePrint();
+      return { ok: true, result };
+    },
+  );
 
-  ctx.actions.register("resume_print", async () => {
-    if (!client) throw prerequisiteMissingError(prereqMessage);
-    const result = await client.resumePrint();
-    return { ok: true, result };
-  });
+  ctx.actions.register(
+    "resume_print",
+    async (_params, actionCtx) => {
+      await assertAgentActionGate(ctx, "resume_print", actionCtx, {
+        flag: CONFIG_GATE_AGENT_PRINT,
+        requires: true,
+        what: "resuming a print",
+      });
+      const client = options.getClient();
+      if (!client) throw prerequisiteMissingError(prereqMessage);
+      const result = await client.resumePrint();
+      return { ok: true, result };
+    },
+  );
 
-  ctx.actions.register("cancel_print", async () => {
-    if (!client) throw prerequisiteMissingError(prereqMessage);
-    const result = await client.cancelPrint();
-    return { ok: true, result };
-  });
+  ctx.actions.register(
+    "cancel_print",
+    async (_params, actionCtx) => {
+      await assertAgentActionGate(ctx, "cancel_print", actionCtx, {
+        flag: CONFIG_GATE_AGENT_PRINT,
+        requires: true,
+        what: "cancelling a print",
+      });
+      const client = options.getClient();
+      if (!client) throw prerequisiteMissingError(prereqMessage);
+      const result = await client.cancelPrint();
+      return { ok: true, result };
+    },
+  );
 
-  // UI-initiated print start. Intentionally NOT gated on
-  // `allow_agent_initiated_print` — that flag covers agent tools; a user
-  // tapping the Start button in the UI is its own consent signal.
-  ctx.actions.register("start_print", async (params: Record<string, unknown>) => {
-    if (!client) throw prerequisiteMissingError(prereqMessage);
-    const filename = typeof params.filename === "string" ? params.filename : "";
-    if (!filename) throw new Error("start_print requires `filename`");
-    const result = await client.startPrint(filename);
-    return { ok: true, result };
-  });
+  // UI-initiated print start. A user tapping Start in the page is its own
+  // consent signal (tap-to-consent, unchanged); an AGENT caller must pass
+  // the same live `allow_agent_initiated_print` gate the tool enforces
+  // (security condition C4 — agent keys can reach the actions bridge).
+  ctx.actions.register(
+    "start_print",
+    async (params: Record<string, unknown>, actionCtx) => {
+      await assertAgentActionGate(ctx, "start_print", actionCtx, {
+        flag: CONFIG_GATE_AGENT_PRINT,
+        requires: true,
+        what: "starting a print",
+      });
+      const client = options.getClient();
+      if (!client) throw prerequisiteMissingError(prereqMessage);
+      const filename = typeof params.filename === "string" ? params.filename : "";
+      if (!filename) throw new Error("start_print requires `filename`");
+      const result = await client.startPrint(filename);
+      return { ok: true, result };
+    },
+  );
 
-  ctx.actions.register("delete_file", async (params: Record<string, unknown>) => {
-    if (!client) throw prerequisiteMissingError(prereqMessage);
-    const path = typeof params.path === "string" ? params.path : "";
-    if (!path) throw new Error("delete_file requires `path`");
-    const root = typeof params.root === "string" ? params.root : "gcodes";
-    const result = await client.deleteFile(path, root);
-    return { ok: true, item: result.item };
-  });
+  // Deleting files is a storage mutation — agents must pass the same
+  // live `auto_upload_artifacts` opt-in that gates agent uploads (the
+  // write-side flag for printer storage); board callers unaffected.
+  ctx.actions.register(
+    "delete_file",
+    async (params: Record<string, unknown>, actionCtx) => {
+      await assertAgentActionGate(ctx, "delete_file", actionCtx, {
+        flag: CONFIG_GATE_AUTO_UPLOAD,
+        requires: true,
+        what: "deleting printer files",
+      });
+      const client = options.getClient();
+      if (!client) throw prerequisiteMissingError(prereqMessage);
+      const path = typeof params.path === "string" ? params.path : "";
+      if (!path) throw new Error("delete_file requires `path`");
+      const root = typeof params.root === "string" ? params.root : "gcodes";
+      const result = await client.deleteFile(path, root);
+      return { ok: true, item: result.item };
+    },
+  );
 
   ctx.actions.register("retry_connection", async () => {
+    const client = options.getClient();
     if (!client) throw prerequisiteMissingError(prereqMessage);
     await client.retryConnection();
     return { ok: true, connection: client.getConnectionState() };
   });
+
+  // ── camera actions (board-only; security conditions C1/C4) ───────────
+  // Pull-based delivery: the page opens the feed when the camera section
+  // becomes visible, polls camera_next while it is shown, and the feed
+  // closes itself after the idle timeout when nobody is watching. This
+  // keeps ONE upstream connection to the printer's single-viewer camera,
+  // never queues frames (keep-latest slot), and never serves frames to
+  // agent keys.
+  const cameraPrereqError = (): Error =>
+    prerequisiteMissingError(
+      "Camera not configured — set flashforgeCameraBaseUrl in the plugin settings to enable the printer page camera.",
+    );
+
+  ctx.actions.register(
+    "camera_open",
+    async (_params, actionCtx) => {
+      assertBoardActor(actionCtx, "camera_open");
+      if (!camera) throw cameraPrereqError();
+      const connection = camera.open();
+      return { ok: true, connection };
+    },
+  );
+
+  ctx.actions.register(
+    "camera_next",
+    async (_params, actionCtx) => {
+      assertBoardActor(actionCtx, "camera_next");
+      if (!camera) throw cameraPrereqError();
+      // Every poll refreshes the idle clock — this IS the viewer heartbeat.
+      camera.touch();
+      const snap = camera.snapshot();
+      return {
+        ok: true,
+        state: snap.state,
+        attempts: snap.attempts,
+        lastError: snap.lastError ?? null,
+        nextRetryInMs: snap.nextRetryInMs ?? null,
+        frame: snap.frame
+          ? {
+              jpegBase64: Buffer.from(snap.frame.bytes).toString("base64"),
+              capturedAt: snap.frame.capturedAt,
+            }
+          : null,
+        staleMs: Number.isFinite(snap.staleMs) ? snap.staleMs : null,
+      };
+    },
+  );
+
+  ctx.actions.register("camera_close", async () => {
+    // Closing is safe for any actor — it only releases the printer's
+    // camera slot; no frames are served by this action.
+    if (!camera) return { ok: true, connection: null };
+    camera.close("page_closed");
+    return { ok: true };
+  });
+
+  ctx.actions.register(
+    "camera_retry",
+    async (_params, actionCtx) => {
+      assertBoardActor(actionCtx, "camera_retry");
+      if (!camera) throw cameraPrereqError();
+      const connection = camera.retry();
+      return { ok: true, connection };
+    },
+  );
+
+  // ── upload_gcode ACTION (the printer page file picker; condition C5) ──
+  // Delegates to the SAME uploadGcodeCore as the tool — filename/path
+  // backstops, gunzip bomb guard, transport upload are code-identical.
+  // Agents must additionally pass the live auto_upload_artifacts gate;
+  // board users keep tap-to-consent.
+  ctx.actions.register(
+    "upload_gcode",
+    async (params: Record<string, unknown>, actionCtx) => {
+      await assertAgentActionGate(ctx, "upload_gcode", actionCtx, {
+        flag: CONFIG_GATE_AUTO_UPLOAD,
+        requires: true,
+        what: "uploading g-code files",
+      });
+      // Actions run OUTSIDE dispatches: they use the current client and
+      // NEVER resolve — a dormant transport surfaces its own
+      // "credential not resolved yet" error to the page.
+      const client = options.getClient();
+      if (!client) throw prerequisiteMissingError(prereqMessage);
+      const filename = typeof params.filename === "string" ? params.filename : "";
+      const gcodeBase64 = typeof params.gcodeBase64 === "string" ? params.gcodeBase64 : "";
+      const path = typeof params.path === "string" ? params.path : undefined;
+      if (!filename) throw new Error("upload_gcode requires `filename`");
+      if (!gcodeBase64) throw new Error("upload_gcode requires `gcodeBase64`");
+      if (gcodeBase64.length > MAX_UPLOAD_ACTION_BASE64_BYTES) {
+        throw new Error(
+          `upload_gcode: refused — inline payload exceeds the ` +
+            `${MAX_UPLOAD_ACTION_BASE64_BYTES}-byte base64 cap.`,
+        );
+      }
+      if (!/^[A-Za-z0-9+/\r\n]+={0,2}$/.test(gcodeBase64) || gcodeBase64.length % 4 !== 0) {
+        throw new Error("upload_gcode: refused — gcodeBase64 is not valid base64.");
+      }
+      const bytes = new Uint8Array(Buffer.from(gcodeBase64, "base64"));
+      // Actions surface refusals by THROWING (the bridge propagates the
+      // message and the page shows it verbatim) — unlike tools, whose
+      // { error } ToolResults are for agent conversations.
+      const result = await uploadGcodeCore({
+        ctx,
+        client,
+        filename,
+        bytes,
+        path,
+        maxInflatedGcodeBytes,
+        source: "action",
+      });
+      if (result && typeof result === "object" && "error" in result && result.error) {
+        throw new Error(result.error);
+      }
+      return result;
+    },
+  );
 
   // ── ctx.tools ───────────────────────────────────────────────────────────
   // Each tool maps to a MoonrakerClient call and gates on the relevant
@@ -372,10 +780,14 @@ export function registerRpcSurface(
       parametersSchema: { type: "object", properties: {}, additionalProperties: false },
     },
     async (): Promise<ToolResult> => {
+      const client = options.getClient();
       if (!client) return prerequisiteMissingToolResult(prereqMessage);
       try {
+        // Cache-only by design (no resolve, no network): status consumes
+        // what the transport already holds and reports the degraded
+        // reason while the credential is unresolved.
         const snapshot = client.getStatusSnapshot();
-        return { data: snapshot };
+        return { data: withDegradedReason(snapshot) };
       } catch (err) {
         return toolError(err, "get_printer_status");
       }
@@ -426,6 +838,7 @@ export function registerRpcSurface(
       },
     },
     async (params, runCtx): Promise<ToolResult> => {
+      const client = options.getClient();
       if (!client) return prerequisiteMissingToolResult(prereqMessage);
       // Re-read config live on every dispatch — never gate off the value
       // captured at setup(). Fails closed if the read errors.
@@ -443,76 +856,37 @@ export function registerRpcSurface(
           artifactId: string;
           path?: string;
         };
-        // Reject an unsafe filename before any artifact fetch or upload:
-        // `filename` is interpolated into the multipart Content-Disposition
-        // of both transports, so the worker re-checks the schema pattern
-        // (defense-in-depth — same reasoning as the `path` backstop below).
-        {
-          const reason = uploadFilenameError(filename);
-          if (reason !== null) {
-            ctx.logger.warn("klipper.upload_gcode.filename_rejected", {
-              filename,
-              reason,
-            });
-            return { error: `upload_gcode: refused — filename ${reason}.` };
+        // C5 shared pipeline (with the upload_gcode ACTION) + F5 ordering:
+        // local validation runs FIRST so a malformed call never spends a
+        // resolve or starts the dormant transport.
+        const earlyRefusal = validateUploadInputs(ctx, filename, path, "tool");
+        if (earlyRefusal !== null) return earlyRefusal;
+        // Lazy credential resolution — INSIDE the dispatch (dispatch
+        // attribution authorizes `secrets.resolve`). The resolution also
+        // STARTS the dormant transport, so the first upload brings the
+        // printer online.
+        let active = client;
+        if (options.ensureCredential) {
+          const cred = await options.ensureCredential(liveConfig, "upload_gcode");
+          if (!cred.ok) {
+            return { error: `upload_gcode: refused — ${cred.reason}` };
           }
+          // The resolution may have converged (replaced) the client object;
+          // the actual upload must use the CURRENT one.
+          active = options.getClient() ?? client;
         }
-        // Reject a traversal-y subdirectory before any artifact fetch
-        // or upload. Defense-in-depth over the schema `pattern`; an empty path
-        // means "no subdirectory" (matches MoonrakerClient's truthiness check)
-        // and is left to pass through untouched.
-        if (typeof path === "string" && path.length > 0) {
-          const reason = uploadPathError(path);
-          if (reason !== null) {
-            ctx.logger.warn("klipper.upload_gcode.path_rejected", {
-              filename,
-              path,
-              reason,
-            });
-            return { error: `upload_gcode: refused — path ${reason}.` };
-          }
-        }
-        // The host resolves the attachment under the dispatching
-        // agent's identity. The worker never base64-decodes inline bytes.
+        // The host resolves the attachment under the dispatching agent's
+        // identity; the worker never receives inline bytes on this path.
         const artifact = await runCtx.artifacts.fetch(artifactId);
-        // Real prints only fit the 10 MB attachment store when
-        // gzipped, but Moonraker needs the plain g-code. Transparently inflate
-        // gzip-magic (0x1f 0x8b) artifacts; plain artifacts pass through
-        // untouched. The bomb guard is enforced DURING inflation via
-        // `maxOutputLength` so a malicious archive cannot balloon into memory.
-        let bytes: Uint8Array = artifact.bytes;
-        if (bytes.length >= 2 && bytes[0] === 0x1f && bytes[1] === 0x8b) {
-          try {
-            bytes = gunzipSync(bytes, { maxOutputLength: maxInflatedGcodeBytes });
-          } catch (err) {
-            const code = (err as NodeJS.ErrnoException).code;
-            // ERR_BUFFER_TOO_LARGE is thrown mid-inflation once the output
-            // would cross the cap — the bomb guard fired. Any other error means
-            // the artifact carried gzip magic but was not valid gzip.
-            const bomb = code === "ERR_BUFFER_TOO_LARGE";
-            ctx.logger.warn("klipper.upload_gcode.gunzip_failed", {
-              filename,
-              gzBytes: artifact.bytes.length,
-              maxInflatedGcodeBytes,
-              code,
-              bomb,
-            });
-            return {
-              error: bomb
-                ? `upload_gcode: refused — decompressed g-code exceeds the ` +
-                  `${maxInflatedGcodeBytes}-byte cap (possible gzip bomb).`
-                : `upload_gcode: refused — artifact has gzip magic but could ` +
-                  `not be decompressed (${code ?? "unknown error"}).`,
-            };
-          }
-          ctx.logger.info("klipper.upload_gcode.gunzip", {
-            filename,
-            gzBytes: artifact.bytes.length,
-            inflatedBytes: bytes.length,
-          });
-        }
-        const result = await client.uploadGcode(filename, bytes, { path });
-        return { data: result };
+        return await uploadGcodeCore({
+          ctx,
+          client: active,
+          filename,
+          bytes: artifact.bytes,
+          path,
+          maxInflatedGcodeBytes,
+          source: "tool",
+        });
       } catch (err) {
         return toolError(err, "upload_gcode");
       }
@@ -540,6 +914,7 @@ export function registerRpcSurface(
       },
     },
     async (params): Promise<ToolResult> => {
+      const client = options.getClient();
       if (!client) return prerequisiteMissingToolResult(prereqMessage);
       // Re-read config live on every dispatch — never gate off the value
       // captured at setup(). Fails closed if the read errors.
@@ -566,7 +941,18 @@ export function registerRpcSurface(
             return { error: `start_print: refused — filename ${reason}.` };
           }
         }
-        const result = await client.startPrint(filename);
+        // Lazy credential resolution — INSIDE the dispatch (see
+        // upload_gcode). Gate + validation run first; a refused dispatch
+        // never spends a resolve.
+        let active = client;
+        if (options.ensureCredential) {
+          const cred = await options.ensureCredential(liveConfig, "start_print");
+          if (!cred.ok) {
+            return { error: `start_print: refused — ${cred.reason}` };
+          }
+          active = options.getClient() ?? client;
+        }
+        const result = await active.startPrint(filename);
         return { data: { ok: true, result } };
       } catch (err) {
         return toolError(err, "start_print");
@@ -583,6 +969,12 @@ export function registerRpcSurface(
  * context window.
  */
 function toolError(err: unknown, toolName: string): ToolResult {
+  if (err instanceof FlashForgeCredentialPendingError) {
+    return {
+      error: `${toolName}: refused — ${CREDENTIAL_PENDING_MESSAGE}`,
+      data: { error: "credential_pending" },
+    };
+  }
   if (err instanceof MoonrakerHttpError) {
     return {
       error: `${toolName}: ${err.message}`,

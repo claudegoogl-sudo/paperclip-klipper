@@ -5,6 +5,87 @@ plugin follows semver against the host plugin API (PLA-526 keeps
 `package.json.version` and the manifest version in lockstep via the build
 `define`).
 
+## 0.2.6 — 2026-09-24
+
+### Added
+- **Live camera section on the printer page.** The worker proxies the
+  printer's single-viewer MJPG camera — scope-pinned to `/?action=stream`,
+  http(s)-only, host-allowlisted, no userinfo — over ONE upstream
+  connection, opened only while a board user is actually viewing the page
+  section and closed on unmount, tab-hide, or after the idle timeout.
+  Frames are pulled by the page over the authenticated actions bridge
+  (`camera_open` / `camera_next` / `camera_retry` refuse agent callers;
+  `camera_close` is safe for all) — the camera is never exposed to agent
+  keys or on any additional port. Keep-latest single-frame buffer (never a
+  queue), fail-closed caps (512 KB/frame, 1 MB SOI-less prefix), jittered
+  exponential backoff (1 s → 30 s) with terminal `failed` after 6 attempts,
+  20 s viewer-idle self-release, frames never logged. A stale frame is
+  never shown as live (stale banner past 2.5 s) and an explicit Retry is
+  offered after terminal failure.
+
+### Changed
+- **Printer-control actions now gate agent-key callers**: `pause_print`,
+  `resume_print`, `cancel_print`, and `start_print` require the same live
+  `allow_agent_initiated_print` read the agent tools enforce; `delete_file`
+  and the `upload_gcode` action require live `auto_upload_artifacts`.
+  Board users keep tap-to-consent. The `upload_gcode` action shares the
+  tool's upload pipeline as code identity (filename/path backstops, gzip
+  bomb guard, inline base64 cap); the tool validates inputs BEFORE the
+  in-dispatch credential resolve so a malformed call never spends a
+  resolve.
+- Vendored plugin SDK refreshed to the 2026.923.1-fork51 generation.
+
+## 0.2.5 — 2026-09-24
+
+### Fixed
+- **Transport credentials resolve lazily inside tool dispatches —
+  config-apply resolves NOTHING.** 0.2.4 resolved `moonrakerApiKeyRef` /
+  `flashforgeCheckCodeRef` inside the host's scoped `configChanged` push,
+  but the host runs plugin applies async to that push, so every apply-time
+  resolve landed with 0 or 2+ invocations in flight and was DENIED by
+  single-in-flight attribution (`InvocationScopeDeniedError`) — no
+  credentialed transport ever came up. Resolution now happens in the one
+  reliably attributed context: an in-flight tool dispatch (the executeTool
+  scope carries companyId+runId). Ref-bearing transports converge DORMANT
+  at apply (fail-closed idle), the first credentialed dispatch resolves the
+  ref exactly once, starts the transport, and passes the gates; the
+  resolved plaintext is cached in memory keyed to the live config
+  fingerprint and invalidated on EVERY config application, so a rotated
+  secret lands at the next dispatch. The idle state is observable — status
+  data key, status tool, and health all report "credential not resolved
+  yet" — and a resolve failure keeps the transport dormant with no
+  credential material in any log. As a side effect, credentialed dispatches
+  no longer run on the last-applied company's client: the client is
+  rebuilt from the dispatching company's validated live config whenever
+  the connection fingerprint differs.
+- **Unauthenticated-moonraker dispatches are identity-guarded on the
+  shared worker.** The host runs ONE worker child per plugin, shared by
+  every company, and the unauth branch of the credential gate used to
+  return ok without comparing the live client against the dispatching
+  company's config — after company B's config row was applied last, a
+  company A dispatch uploaded to and drove B's printer (persistent
+  cross-tenant misrouting, not a rare race). The branch now validates the
+  live config (fail-closed on invalid), and rebuilds the client from it
+  whenever the live client's connection identity differs. Dispatch-time
+  rebuilds also keep the worker's config identity in sync, so the next
+  apply of the previous company's row correctly replaces the connection
+  instead of misreading it as an unchanged replay.
+- **The credentialed fast path re-verifies the HELD client's identity
+  (C1b, same cross-tenant class as the unauth guard).** The resolution
+  cache is keyed to the config fingerprint, not to the client — and an
+  interleaved dispatch from another company can replace the held client
+  (e.g. the unauth rebuild above) without touching the cache. Company
+  A(resolved) → company B(unauth rebuild) → company A used to fast-path
+  onto B's client and upload to / print on B's printer until the next
+  config application. The fast path now requires the same
+  connection-identity predicate as the resolve path and falls through to
+  the full in-dispatch resolve on mismatch; the unauth rebuild also drops
+  any surviving cache entry (the transport holds no plaintext after it).
+- **upload_gcode order is gate → validate → resolve** (matching
+  start_print): a malformed filename or subdirectory is refused before any
+  credential resolve or transport start — a malformed call never spends a
+  resolve.
+
 ## 0.2.4 — 2026-09-24
 
 ### Fixed
