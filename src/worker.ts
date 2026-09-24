@@ -605,8 +605,13 @@ export async function createKlipperWorker(
     }
 
     // Unauthenticated Moonraker (no ref configured): nothing to resolve.
-    // The transport started at config apply; this start is a safety net for
-    // a client that has not been started yet.
+    // The host runs ONE worker child per plugin, shared by every company,
+    // so the live client here may be the LAST-APPLIED company's transport
+    // (boot replay / operator save ordering), not the dispatching one.
+    // Apply the credentialed path's own identity guard: validate the live
+    // config, and rebuild the client from it whenever the live client's
+    // connection identity differs — otherwise this dispatch would be
+    // routed onto another company's printer.
     if (
       selection.kind === "moonraker" &&
       !(
@@ -615,6 +620,56 @@ export async function createKlipperWorker(
       )
     ) {
       credentialPendingReason = null;
+      if (!liveConfig.moonrakerBaseUrl) {
+        return {
+          ok: false,
+          reason: "moonrakerBaseUrl is not set — fix the plugin config and retry",
+        };
+      }
+      const validated = validateMoonrakerBaseUrl(
+        liveConfig.moonrakerBaseUrl,
+        liveConfig.moonrakerAllowedHosts,
+      );
+      if (!validated.ok) {
+        return {
+          ok: false,
+          reason: `the moonraker transport config is invalid (${validated.reason}) — fix the plugin config and retry`,
+        };
+      }
+      // Same `reusable` guard as the credentialed path below: keep the
+      // live client only when its connection identity matches the
+      // dispatching company's validated config.
+      const reusable =
+        handle.client !== null &&
+        handle.client.kind === selection.kind &&
+        transportFingerprint(handle.config) === fingerprint;
+      if (!reusable) {
+        if (handle.client) {
+          const old = handle.client;
+          handle.client = null;
+          old.stop();
+          ctx.logger.info("klipper.connection_replaced", {
+            pluginId: "platform.klipper",
+            source: "dispatch",
+            moonrakerBaseUrl: validated.url.toString(),
+          });
+        }
+        transportStarted = false;
+        handle.client = new MoonrakerClient({
+          baseUrl: validated.url.toString(),
+          apiKey: null,
+          http: ctx.http,
+          logger: ctx.logger,
+          ...transportStreamCallbacks,
+          ...clientOverrides,
+        });
+        // Keep the apply-path invariant that `handle.config` describes the
+        // client the worker currently holds. Without this, the next apply
+        // of the previous company's row would misread the just-rebuilt
+        // client as "unchanged" and keep the WRONG connection alive.
+        handle.config = liveConfig as KlipperConfig;
+        handle.configKnown = true;
+      }
       if (handle.client && !transportStarted) {
         transportStarted = true;
         void handle.client.start().catch((err) => {
@@ -741,6 +796,12 @@ export async function createKlipperWorker(
               ...transportStreamCallbacks,
               ...clientOverrides,
             });
+      // Same invariant as the apply path and the unauth branch above:
+      // `handle.config` must describe the client the worker now holds,
+      // or the next apply of the previous company's row treats this
+      // rebuilt client as "unchanged" and routes on the WRONG connection.
+      handle.config = liveConfig as KlipperConfig;
+      handle.configKnown = true;
     } else {
       // `reusable` guarantees the client exists (TS cannot narrow through
       // the closure, so this stays optional-chained).

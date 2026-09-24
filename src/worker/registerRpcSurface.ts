@@ -511,25 +511,15 @@ export function registerRpcSurface(
           artifactId: string;
           path?: string;
         };
-        // Lazy credential resolution — INSIDE the dispatch (dispatch
-        // attribution authorizes `secrets.resolve`). Local validation runs
-        // first so a malformed call never spends a resolve; a refused gate
-        // never does either. The resolution also STARTS the dormant
-        // transport, so the first upload brings the printer online.
-        let active = client;
-        if (options.ensureCredential) {
-          const cred = await options.ensureCredential(liveConfig, "upload_gcode");
-          if (!cred.ok) {
-            return { error: `upload_gcode: refused — ${cred.reason}` };
-          }
-          // The resolution may have converged (replaced) the client object;
-          // the actual upload must use the CURRENT one.
-          active = options.getClient() ?? client;
-        }
-        // Reject an unsafe filename before any artifact fetch or upload:
-        // `filename` is interpolated into the multipart Content-Disposition
-        // of both transports, so the worker re-checks the schema pattern
-        // (defense-in-depth — same reasoning as the `path` backstop below).
+        // Gate → validate → resolve (matching start_print and the stated
+        // invariant): local validation runs FIRST so a malformed call never
+        // spends a resolve or starts the dormant transport; a refused gate
+        // never does either.
+        // Reject an unsafe filename before any resolve, artifact fetch or
+        // upload: `filename` is interpolated into the multipart
+        // Content-Disposition of both transports, so the worker re-checks
+        // the schema pattern (defense-in-depth — same reasoning as the
+        // `path` backstop below).
         {
           const reason = uploadFilenameError(filename);
           if (reason !== null) {
@@ -540,10 +530,10 @@ export function registerRpcSurface(
             return { error: `upload_gcode: refused — filename ${reason}.` };
           }
         }
-        // Reject a traversal-y subdirectory before any artifact fetch
-        // or upload. Defense-in-depth over the schema `pattern`; an empty path
-        // means "no subdirectory" (matches MoonrakerClient's truthiness check)
-        // and is left to pass through untouched.
+        // Reject a traversal-y subdirectory before any resolve, artifact
+        // fetch or upload. Defense-in-depth over the schema `pattern`; an
+        // empty path means "no subdirectory" (matches MoonrakerClient's
+        // truthiness check) and is left to pass through untouched.
         if (typeof path === "string" && path.length > 0) {
           const reason = uploadPathError(path);
           if (reason !== null) {
@@ -554,6 +544,21 @@ export function registerRpcSurface(
             });
             return { error: `upload_gcode: refused — path ${reason}.` };
           }
+        }
+        // Lazy credential resolution — INSIDE the dispatch (dispatch
+        // attribution authorizes `secrets.resolve`). Runs after the local
+        // validation above so a malformed call never spends a resolve. The
+        // resolution also STARTS the dormant transport, so the first
+        // upload brings the printer online.
+        let active = client;
+        if (options.ensureCredential) {
+          const cred = await options.ensureCredential(liveConfig, "upload_gcode");
+          if (!cred.ok) {
+            return { error: `upload_gcode: refused — ${cred.reason}` };
+          }
+          // The resolution may have converged (replaced) the client object;
+          // the actual upload must use the CURRENT one.
+          active = options.getClient() ?? client;
         }
         // The host resolves the attachment under the dispatching
         // agent's identity. The worker never base64-decodes inline bytes.
