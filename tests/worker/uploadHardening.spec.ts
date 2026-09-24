@@ -54,6 +54,11 @@ function buildStubCtx(registered: RegisteredTool[]): PluginContext {
     // the tests exercise the filename backstop, not the gate refusal.
     config: {
       get: async () => ({ auto_upload_artifacts: true, allow_agent_initiated_print: true }),
+      // fork51 PluginConfigClient types the fork-only background read; this
+      // worker never calls it (config reaches the worker via the replay).
+      getForServiceScope: async (): Promise<Record<string, unknown>> => {
+        throw new Error("config.getForServiceScope is not used by this plugin");
+      },
     } as PluginContext["config"],
     logger: {
       debug: noop,
