@@ -20,6 +20,15 @@
  *        resolve" invariant. Ordering regression below: the refusal must
  *        cost zero resolves and zero wire traffic.
  *
+ *   C1b — the credentialed fast path re-verifies the HELD client. The
+ *        cache is keyed to the config fingerprint, not to the client, and
+ *        the unauth rebuild (C1) replaces the client without touching the
+ *        cache — so A(resolved) → B(unauth rebuild) → A used to fast-path
+ *        onto B's client and upload/print on B's printer. The fast path
+ *        now requires the same connection-identity predicate as the
+ *        resolve path, and the unauth rebuild drops any surviving cache
+ *        entry (the transport holds no plaintext after it).
+ *
  * The interleaving tests replay the exact hostile order on one worker:
  * apply B's config row → dispatch A → the connection must target A's
  * printer X, and B's printer Y must never see an upload.
@@ -228,4 +237,122 @@ describe("F5: upload_gcode order is gate → validate → resolve", () => {
       await mock.stop();
     }
   });
+});
+
+describe("C1b: credentialed fast path re-verifies the held client", () => {
+  let printerX: MockMoonraker; // company A's credentialed printer
+  let printerY: MockMoonraker; // company B's unauth printer
+
+  beforeEach(async () => {
+    printerX = new MockMoonraker({ requireApiKey: "key-a" });
+    printerY = new MockMoonraker();
+    await printerX.start();
+    await printerY.start();
+  });
+
+  afterEach(async () => {
+    await printerX.stop();
+    await printerY.stop();
+  });
+
+  function configA(): Record<string, unknown> {
+    return {
+      moonrakerBaseUrl: printerX.baseUrl(),
+      moonrakerApiKeyRef: "moonraker-key",
+      auto_upload_artifacts: true,
+    };
+  }
+
+  function configB(): Record<string, unknown> {
+    return {
+      moonrakerBaseUrl: printerY.baseUrl(),
+      auto_upload_artifacts: true,
+    };
+  }
+
+  it(
+    "A(credentialed X) → B(unauth Y) → A: the second A dispatch re-resolves," +
+      " rebuilds, and uploads to X — never onto B's client or printer Y",
+    async () => {
+      const harness = createTestHarness({
+        manifest,
+        capabilities: [...CAPABILITIES],
+        config: configA(),
+      });
+      const resolves: unknown[] = [];
+      harness.ctx.secrets.resolve = (async (ref: unknown) => {
+        resolves.push(ref);
+        return "key-a";
+      }) as typeof harness.ctx.secrets.resolve;
+
+      const worker = await createKlipperWorker(harness.ctx, { autoStart: false });
+      // 0.2.5 apply resolves NOTHING — the credentialed transport
+      // converges DORMANT (client held with no credential, not started)
+      // until the first dispatch resolves the ref.
+      await worker.applyConfig(configA(), "configChanged", false);
+      expect(resolves).toHaveLength(0);
+      expect(worker.getCredentialPendingReason()).toContain(
+        "credential not resolved yet",
+      );
+
+      // Step 1 — A dispatches: in-dispatch resolve, client A, upload on X.
+      const first = await harness.executeTool<{ error?: string }>(
+        "klipper.upload_gcode",
+        { filename: "bracket.gcode", artifactId: ARTIFACT_ID },
+        artifactCtx(),
+      );
+      expect(first.error).toBeUndefined();
+      expect(resolves).toHaveLength(1);
+      expect(printerX.uploadedFiles).toHaveLength(1);
+      expect(printerY.uploadedFiles).toHaveLength(0);
+      const clientA = worker.client;
+      expect(printerX.seenApiKeys.has("key-a")).toBe(true);
+
+      // Step 2 — B dispatches (unauth, printer Y): the C1 identity guard
+      // rebuilds the client from B's validated live config. This branch
+      // does not resolve a credential — resolves stays at 1.
+      harness.setConfig(configB());
+      const second = await harness.executeTool<{ error?: string }>(
+        "klipper.upload_gcode",
+        { filename: "bracket.gcode", artifactId: ARTIFACT_ID },
+        artifactCtx(),
+      );
+      expect(second.error).toBeUndefined();
+      expect(resolves).toHaveLength(1);
+      expect(printerY.uploadedFiles).toHaveLength(1);
+      expect(worker.client).not.toBeNull();
+      expect(worker.client).not.toBe(clientA);
+      const clientB = worker.client;
+
+      // Step 3 — A dispatches again: the cache fingerprint still matches
+      // A's config, but the held client is B's. Trusting it here routed
+      // the upload onto printer Y (the C1b attack). The fix re-verifies
+      // the held client's identity, falls through to the in-dispatch
+      // resolve, and rebuilds company A's client from A's validated
+      // config.
+      harness.setConfig(configA());
+      const third = await harness.executeTool<{ error?: string }>(
+        "klipper.upload_gcode",
+        { filename: "bracket.gcode", artifactId: ARTIFACT_ID },
+        artifactCtx(),
+      );
+      expect(third.error).toBeUndefined();
+      // Routing first: the upload must land on X, and Y must still hold
+      // ONLY B's own (legitimate) upload from step 2.
+      expect(printerX.uploadedFiles).toHaveLength(2);
+      expect(printerY.uploadedFiles).toHaveLength(1);
+      // The fix re-resolves in-dispatch (fast path fell through).
+      expect(resolves).toHaveLength(2);
+      expect(worker.client).not.toBeNull();
+      expect(worker.client).not.toBe(clientB);
+      // The rebuilt client authenticated with A's freshly resolved key.
+      expect(printerX.seenApiKeys.has("key-a")).toBe(true);
+
+      // The rebuild starts its WS loop asynchronously; wait for the
+      // token-authenticated handshake to complete so (a) the test proves
+      // the rebuilt client actually connects and (b) teardown never races
+      // an in-flight WS upgrade against the mock server's close().
+      await waitFor(() => worker.client!.getConnectionState().state === "connected");
+    },
+  );
 });

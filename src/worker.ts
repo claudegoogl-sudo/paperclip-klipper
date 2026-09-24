@@ -669,6 +669,13 @@ export async function createKlipperWorker(
         // client as "unchanged" and keep the WRONG connection alive.
         handle.config = liveConfig as KlipperConfig;
         handle.configKnown = true;
+        // Belt-and-suspenders for the credentialed fast path below: after
+        // an unauth rebuild the transport holds NO resolved plaintext, so
+        // any surviving cache entry is stale by construction (its
+        // fingerprint can describe the config while the held client does
+        // not). Drop it rather than let a later dispatch fast-path onto
+        // the rebuilt unauthenticated client.
+        credentialCache = null;
       }
       if (handle.client && !transportStarted) {
         transportStarted = true;
@@ -681,17 +688,37 @@ export async function createKlipperWorker(
       return { ok: true };
     }
 
-    // Fast path: already resolved for THIS exact config — the transport
-    // holds the plaintext; just make sure its loop is running.
+    // Connection identity of the HELD client vs the dispatching company's
+    // validated live config. A thunk, not a snapshot: the fast path calls
+    // it before the resolve, and the resolve path re-evaluates it after
+    // the await (a concurrent dispatch continuation may replace the client
+    // while the secret resolve is in flight).
+    const identityMatches = (): boolean =>
+      handle.client !== null &&
+      handle.client.kind === selection.kind &&
+      transportFingerprint(handle.config) === fingerprint;
+
+    // Fast path: already resolved for THIS exact config AND the held
+    // client still IS this company's transport. The identity re-check is
+    // mandatory: the cache is keyed to the config fingerprint, not to the
+    // client, and an interleaved dispatch from another company (e.g. the
+    // unauth rebuild above) can replace the client WITHOUT touching the
+    // cache — trusting it here would route this dispatch onto the other
+    // company's printer. On any mismatch, fall through to the full
+    // in-dispatch resolve below, which rebuilds from the validated live
+    // config and syncs the config identity.
     if (
       credentialCache !== null &&
       credentialCache.fingerprint === fingerprint &&
-      handle.client
+      identityMatches()
     ) {
       credentialPendingReason = null;
       if (!transportStarted) {
         transportStarted = true;
-        if (handle.client.kind === "moonraker") {
+        // TS cannot narrow `handle.client` through the `identityMatches`
+        // thunk, so this stays optional-chained (the fast-path condition
+        // guarantees a client of the selected kind exists).
+        if (handle.client?.kind === "moonraker") {
           void handle.client.start().catch((err) => {
             ctx.logger.warn("klipper.ws.initial_connect_failed", {
               error: String(err instanceof Error ? err.message : err),
@@ -763,13 +790,12 @@ export async function createKlipperWorker(
     credentialCache = { fingerprint, plaintext };
 
     // Converge the transport onto the LIVE config with the credential:
-    // reuse the dormant client when its connection identity matches the
-    // live config, otherwise rebuild from the validated live config (the
-    // dispatching company's config is authoritative at dispatch time).
-    const reusable =
-      handle.client !== null &&
-      handle.client.kind === selection.kind &&
-      transportFingerprint(handle.config) === fingerprint;
+    // reuse the client only when its connection identity matches the live
+    // config (re-evaluated AFTER the resolve await — the held client may
+    // have been replaced while the resolve was in flight), otherwise
+    // rebuild from the validated live config (the dispatching company's
+    // config is authoritative at dispatch time).
+    const reusable = identityMatches();
     if (!reusable) {
       if (handle.client) {
         const old = handle.client;
