@@ -5,6 +5,36 @@ plugin follows semver against the host plugin API (PLA-526 keeps
 `package.json.version` and the manifest version in lockstep via the build
 `define`).
 
+## 0.2.6 — 2026-09-24
+
+### Added
+- **Live camera section on the printer page.** The worker proxies the
+  printer's single-viewer MJPG camera — scope-pinned to `/?action=stream`,
+  http(s)-only, host-allowlisted, no userinfo — over ONE upstream
+  connection, opened only while a board user is actually viewing the page
+  section and closed on unmount, tab-hide, or after the idle timeout.
+  Frames are pulled by the page over the authenticated actions bridge
+  (`camera_open` / `camera_next` / `camera_retry` refuse agent callers;
+  `camera_close` is safe for all) — the camera is never exposed to agent
+  keys or on any additional port. Keep-latest single-frame buffer (never a
+  queue), fail-closed caps (512 KB/frame, 1 MB SOI-less prefix), jittered
+  exponential backoff (1 s → 30 s) with terminal `failed` after 6 attempts,
+  20 s viewer-idle self-release, frames never logged. A stale frame is
+  never shown as live (stale banner past 2.5 s) and an explicit Retry is
+  offered after terminal failure.
+
+### Changed
+- **Printer-control actions now gate agent-key callers**: `pause_print`,
+  `resume_print`, `cancel_print`, and `start_print` require the same live
+  `allow_agent_initiated_print` read the agent tools enforce; `delete_file`
+  and the `upload_gcode` action require live `auto_upload_artifacts`.
+  Board users keep tap-to-consent. The `upload_gcode` action shares the
+  tool's upload pipeline as code identity (filename/path backstops, gzip
+  bomb guard, inline base64 cap); the tool validates inputs BEFORE the
+  in-dispatch credential resolve so a malformed call never spends a
+  resolve.
+- Vendored plugin SDK refreshed to the 2026.923.1-fork51 generation.
+
 ## 0.2.5 — 2026-09-24
 
 ### Fixed
