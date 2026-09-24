@@ -1,5 +1,5 @@
 /**
- * Shared-worker dispatch guard (SE review of 0.2.5, PLA-7872 conditions):
+ * Shared-worker dispatch guard (SE review conditions on 0.2.5):
  *
  *   C1 — the host runs ONE worker child per plugin, shared by every
  *        company (plugin-worker-manager keys workers by pluginId). The
