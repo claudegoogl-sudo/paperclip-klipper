@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createTestHarness } from "@paperclipai/plugin-sdk/testing";
 import manifest from "../src/manifest.js";
-import plugin, { createKlipperWorker } from "../src/worker.js";
+import plugin from "../src/worker.js";
+import { bootWithReplay } from "./helpers/replayBoot.js";
 import { MockMoonraker } from "./fixtures/moonraker/mockServer.js";
 
 /**
@@ -81,7 +82,7 @@ describe("paperclip-klipper config gates", () => {
 
   it("upload_gcode refuses when auto_upload_artifacts is unset", async () => {
     const harness = createTestHarness({ manifest, capabilities: [...CAPABILITIES], config });
-    await createKlipperWorker(harness.ctx, { autoStart: false });
+    await bootWithReplay(harness);
     const result = await harness.executeTool<{ error?: string }>(
       "klipper.upload_gcode",
       {
@@ -94,7 +95,7 @@ describe("paperclip-klipper config gates", () => {
 
   it("start_print refuses when allow_agent_initiated_print is unset", async () => {
     const harness = createTestHarness({ manifest, capabilities: [...CAPABILITIES], config });
-    await createKlipperWorker(harness.ctx, { autoStart: false });
+    await bootWithReplay(harness);
     const result = await harness.executeTool<{ error?: string }>(
       "klipper.start_print",
       { filename: "test.gcode" },
@@ -132,7 +133,7 @@ describe("paperclip-klipper RPC surface", () => {
       capabilities: [...CAPABILITIES],
       config: { moonrakerBaseUrl: mock.baseUrl() },
     });
-    await createKlipperWorker(harness.ctx, { autoStart: false });
+    await bootWithReplay(harness);
     const result = await harness.executeTool<{ data?: { connection: { state: string } } }>(
       "klipper.get_printer_status",
       {},
@@ -146,7 +147,7 @@ describe("paperclip-klipper RPC surface", () => {
       capabilities: [...CAPABILITIES],
       config: { moonrakerBaseUrl: mock.baseUrl() },
     });
-    await createKlipperWorker(harness.ctx, { autoStart: false });
+    await bootWithReplay(harness);
     const result = await harness.performAction<{ ok: boolean; info: { state?: string } }>(
       "refresh",
     );
@@ -160,7 +161,7 @@ describe("paperclip-klipper RPC surface", () => {
       capabilities: [...CAPABILITIES],
       config: { moonrakerBaseUrl: mock.baseUrl(), auto_upload_artifacts: true },
     });
-    await createKlipperWorker(harness.ctx, { autoStart: false });
+    await bootWithReplay(harness);
     // The worker no longer accepts inline gcodeBase64. The host
     // resolves `artifactId` server-side under the dispatching agent's identity
     // and the bytes arrive via `runCtx.artifacts.fetch`. Stub that helper here
@@ -196,7 +197,7 @@ describe("paperclip-klipper RPC surface", () => {
       capabilities: [...CAPABILITIES],
       config: { moonrakerBaseUrl: mock.baseUrl(), allow_agent_initiated_print: true },
     });
-    await createKlipperWorker(harness.ctx, { autoStart: false });
+    await bootWithReplay(harness);
     const result = await harness.executeTool<{ data?: { ok: boolean }; error?: string }>(
       "klipper.start_print",
       { filename: "demo.gcode" },
@@ -211,7 +212,7 @@ describe("paperclip-klipper RPC surface", () => {
       capabilities: [...CAPABILITIES],
       config: { moonrakerBaseUrl: mock.baseUrl() },
     });
-    await createKlipperWorker(harness.ctx, { autoStart: false });
+    await bootWithReplay(harness);
     const status = await harness.getData<{ connection: { state: string } }>("status");
     expect(status.connection.state).toBe("idle");
   });
@@ -240,7 +241,7 @@ describe("paperclip-klipper UI actions", () => {
       capabilities: [...CAPABILITIES],
       config: { moonrakerBaseUrl: mock.baseUrl() },
     });
-    await createKlipperWorker(harness.ctx, { autoStart: false });
+    await bootWithReplay(harness);
     const result = await harness.performAction<{ ok: boolean; result: string }>(
       "start_print",
       { filename: "demo.gcode" },
@@ -263,7 +264,7 @@ describe("paperclip-klipper UI actions", () => {
         // allow_agent_initiated_print intentionally absent
       },
     });
-    await createKlipperWorker(harness.ctx, { autoStart: false });
+    await bootWithReplay(harness);
     const result = await harness.performAction<{ ok: boolean }>(
       "start_print",
       { filename: "demo.gcode" },
@@ -277,7 +278,7 @@ describe("paperclip-klipper UI actions", () => {
       capabilities: [...CAPABILITIES],
       config: { moonrakerBaseUrl: mock.baseUrl() },
     });
-    await createKlipperWorker(harness.ctx, { autoStart: false });
+    await bootWithReplay(harness);
     await mock.stop(); // force a connect error on the next request
     await expect(
       harness.performAction("start_print", { filename: "demo.gcode" }),
@@ -290,7 +291,7 @@ describe("paperclip-klipper UI actions", () => {
       capabilities: [...CAPABILITIES],
       config: { moonrakerBaseUrl: mock.baseUrl() },
     });
-    await createKlipperWorker(harness.ctx, { autoStart: false });
+    await bootWithReplay(harness);
     const result = await harness.performAction<{ ok: boolean; item: { path: string; root: string } }>(
       "delete_file",
       { path: "demo.gcode", root: "gcodes" },
@@ -310,7 +311,7 @@ describe("paperclip-klipper UI actions", () => {
       capabilities: [...CAPABILITIES],
       config: { moonrakerBaseUrl: mock.baseUrl() },
     });
-    await createKlipperWorker(harness.ctx, { autoStart: false });
+    await bootWithReplay(harness);
     await expect(harness.performAction("delete_file", {})).rejects.toThrow(/path/);
   });
 
@@ -320,7 +321,7 @@ describe("paperclip-klipper UI actions", () => {
       capabilities: [...CAPABILITIES],
       config: { moonrakerBaseUrl: mock.baseUrl() },
     });
-    await createKlipperWorker(harness.ctx, { autoStart: false });
+    await bootWithReplay(harness);
     const result = await harness.performAction<{ ok: boolean; result: string }>(
       "resume_print",
     );
@@ -338,7 +339,7 @@ describe("paperclip-klipper UI actions", () => {
       capabilities: [...CAPABILITIES],
       config: { moonrakerBaseUrl: mock.baseUrl() },
     });
-    await createKlipperWorker(harness.ctx, { autoStart: false });
+    await bootWithReplay(harness);
     await mock.stop();
     await expect(harness.performAction("resume_print")).rejects.toThrow();
   });

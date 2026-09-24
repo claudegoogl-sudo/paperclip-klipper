@@ -22,8 +22,14 @@
  *     metadata so an upload can never imply a print: `printNow` is always
  *     "false" and `levelingBeforePrint` "false" — there is no code path
  *     that starts a print from upload.
- *   - The check code is a per-printer credential: resolved per call via
- *     `ctx.secrets.resolve`, never cached beyond one request, never logged.
+ *   - The check code is a per-printer credential: the worker resolves it
+ *     ONCE per config application (inside the host's scoped config push)
+ *     and hands the plaintext to this client. The client holds it in memory
+ *     only — never logged, never persisted, and refreshed on every config
+ *     application so the cache never outlives the config that produced it.
+ *     The client itself makes NO worker→host calls: every request reads the
+ *   in-memory credential, so background work (the status poll, health
+ *   probes, UI data keys) can never leak an unscoped secrets.resolve RPC.
  *     Request bodies carry it, so bodies are never logged either.
  *   - Outbound traffic is restricted to the configured base URL host —
  *     every URL this client builds is checked against the base host before
@@ -35,10 +41,9 @@
 import { randomBytes } from "node:crypto";
 import type {
   PluginHttpClient,
-  PluginSecretsClient,
   PluginLogger,
 } from "@paperclipai/plugin-sdk";
-import { resolveSecretRef, type SecretRef } from "../secretRef.js";
+
 import type {
   ConnectionStateSnapshot,
   FileListEntry,
@@ -152,14 +157,16 @@ export interface FlashForgeClientOptions {
   /** Printer serial number — the LAN-mode Device ID (an identifier, not a secret). */
   serialNumber: string;
   /**
-   * Secret ref for the per-printer check code credential — either the
-   * legacy string shape or the object binding ref; passed to
-   * `ctx.secrets.resolve` exactly as configured (fail closed if the host
-   * cannot resolve it).
+   * PRE-RESOLVED per-printer check code credential. The worker resolves the
+   * configured ref once per config application — inside the host's scoped
+   * `configChanged` push — and fails closed (no client is constructed) when
+   * resolution fails, so a FlashForgeClient never exists without a
+   * credential. Held in memory only; never logged, never persisted. Use
+   * `applyCredential()` to swap in a freshly resolved value on config
+   * re-application.
    */
-  checkCodeRef: SecretRef;
+  checkCode: string;
   http: PluginHttpClient;
-  secrets: PluginSecretsClient;
   logger: PluginLogger;
   /** Status poll interval while started. Default 10s. */
   pollIntervalMs?: number;
@@ -278,9 +285,9 @@ export class FlashForgeClient implements PrinterTransport {
 
   private readonly baseUrl: URL;
   private readonly serialNumber: string;
-  private readonly checkCodeRef: SecretRef;
+  /** Pre-resolved check code; swapped atomically on config re-application. */
+  private checkCode: string;
   private readonly http: PluginHttpClient;
-  private readonly secrets: PluginSecretsClient;
   private readonly logger: PluginLogger;
   private readonly pollIntervalMs: number;
   private readonly probeTimeoutMs: number;
@@ -302,9 +309,8 @@ export class FlashForgeClient implements PrinterTransport {
   constructor(private readonly opts: FlashForgeClientOptions) {
     this.baseUrl = new URL(opts.baseUrl);
     this.serialNumber = opts.serialNumber;
-    this.checkCodeRef = opts.checkCodeRef;
+    this.checkCode = opts.checkCode;
     this.http = opts.http;
-    this.secrets = opts.secrets;
     this.logger = opts.logger;
     this.pollIntervalMs = opts.pollIntervalMs ?? 10_000;
     this.probeTimeoutMs = opts.probeTimeoutMs ?? 5_000;
@@ -411,7 +417,7 @@ export class FlashForgeClient implements PrinterTransport {
     parts.push(`--${boundary}--${CRLF}`);
     const body = parts.join("");
 
-    const checkCode = await this.resolveCheckCode();
+    const checkCode = this.checkCodeCredential();
     const headers: Record<string, string> = {
       "Content-Type": `multipart/form-data; boundary=${boundary}`,
       // Header names/expected values mirror the reference client's upload.
@@ -583,9 +589,24 @@ export class FlashForgeClient implements PrinterTransport {
     return action;
   }
 
-  /** Resolve the check code per call; never cached, never logged. */
-  private async resolveCheckCode(): Promise<string> {
-    return resolveSecretRef(this.secrets, this.checkCodeRef);
+  /**
+   * In-memory check code read. NEVER a worker→host call: resolution moved
+   * to the worker's config-apply path so the status poll / health probes /
+   * UI data keys cannot fire an unscoped `secrets.resolve` RPC (which the
+   * host attributes single-in-flight and permanently denies when nothing is
+   * in flight). Never logged.
+   */
+  private checkCodeCredential(): string {
+    return this.checkCode;
+  }
+
+  /**
+   * Swap in a freshly resolved credential (worker config re-application).
+   * Applies to every subsequent request; in-flight requests keep the value
+   * they already captured. The plaintext is never logged by this method.
+   */
+  applyCredential(credential: string): void {
+    this.checkCode = credential;
   }
 
   /**
@@ -593,7 +614,7 @@ export class FlashForgeClient implements PrinterTransport {
    * client). Bodies are never logged — they carry the check code.
    */
   private async requestJson<T>(path: string, extraBody?: Record<string, unknown>): Promise<T> {
-    const checkCode = await this.resolveCheckCode();
+    const checkCode = this.checkCodeCredential();
     const url = this.scopedUrl(path);
     const body = JSON.stringify({
       serialNumber: this.serialNumber,

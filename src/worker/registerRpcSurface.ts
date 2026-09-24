@@ -56,7 +56,8 @@ export interface KlipperConfig {
   /**
    * Secret ref for the Moonraker API key — legacy string shape or the
    * object binding ref ({ type: "secret_ref", secretId, version? }).
-   * Resolved per call; never stored in plaintext.
+   * Resolved once per config application; the plaintext never reaches
+   * this surface (handlers see the ref only).
    */
   moonrakerApiKeyRef?: SecretRef;
   /**
@@ -71,8 +72,9 @@ export interface KlipperConfig {
   flashforgeSerialNumber?: string;
   /**
    * Secret reference for the per-printer check code credential — legacy
-   * string shape or the object binding ref. Resolved per request; never
-   * stored in plaintext.
+   * string shape or the object binding ref. Resolved once per config
+   * application; the plaintext never reaches this surface (handlers see
+   * the ref only).
    */
   flashforgeCheckCodeRef?: SecretRef;
   auto_upload_artifacts?: boolean;

@@ -170,13 +170,11 @@ describe("F2: printer-controlled envelope message is capped at 1024 chars", () =
       warn: () => undefined,
       error: () => undefined,
     };
-    const secrets: PluginSecretsClient = { async resolve() { return "cc"; } };
     return new FlashForgeClient({
       baseUrl: "http://printer.lan:8898",
       serialNumber: "SN",
-      checkCodeRef: "ref",
+      checkCode: "cc",
       http: makeStubHttp(message),
-      secrets,
       logger,
     });
   }

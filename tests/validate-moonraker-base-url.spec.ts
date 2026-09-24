@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { createTestHarness } from "@paperclipai/plugin-sdk/testing";
 import manifest from "../src/manifest.js";
-import { createKlipperWorker } from "../src/worker.js";
+import { bootWithReplay } from "./helpers/replayBoot.js";
 import { validateMoonrakerBaseUrl } from "../src/worker/validateMoonrakerBaseUrl.js";
 
 /**
@@ -77,7 +77,7 @@ describe("createKlipperWorker fails closed on an invalid moonrakerBaseUrl", () =
       capabilities: [...CAPABILITIES],
       config: { moonrakerBaseUrl: "javascript:alert(1)", moonrakerApiKeyRef: "secret-key" },
     });
-    const worker = await createKlipperWorker(harness.ctx, { autoStart: false });
+    const worker = await bootWithReplay(harness);
     expect(worker.client).toBeNull();
     const warnLine = harness.logs.find(
       (e) => e.level === "warn" && e.message.includes("rejected moonrakerBaseUrl"),
@@ -98,7 +98,7 @@ describe("createKlipperWorker fails closed on an invalid moonrakerBaseUrl", () =
         moonrakerApiKeyRef: "secret-key",
       },
     });
-    const worker = await createKlipperWorker(harness.ctx, { autoStart: false });
+    const worker = await bootWithReplay(harness);
     expect(worker.client).toBeNull();
     const result = await harness.executeTool<{ data?: { error?: string } }>(
       "klipper.get_printer_status",
@@ -113,7 +113,7 @@ describe("createKlipperWorker fails closed on an invalid moonrakerBaseUrl", () =
       capabilities: [...CAPABILITIES],
       config: { moonrakerBaseUrl: "not a url" },
     });
-    await expect(createKlipperWorker(harness.ctx, { autoStart: false })).resolves.not.toThrow();
+    await expect(bootWithReplay(harness)).resolves.not.toThrow();
   });
 
   it("still connects when moonrakerBaseUrl is valid and no allowlist is set (no behavior change for existing single-host configs)", async () => {
@@ -122,7 +122,7 @@ describe("createKlipperWorker fails closed on an invalid moonrakerBaseUrl", () =
       capabilities: [...CAPABILITIES],
       config: { moonrakerBaseUrl: "http://127.0.0.1:1" },
     });
-    const worker = await createKlipperWorker(harness.ctx, { autoStart: false });
+    const worker = await bootWithReplay(harness);
     expect(worker.client).not.toBeNull();
   });
 });

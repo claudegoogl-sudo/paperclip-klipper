@@ -13,20 +13,22 @@
  *   - A connection-state stream so the UI can render disconnected/reconnecting
  *     banners via `usePluginStream`.
  *
- * Secret handling rules carried from the plan brief and acceptance:
- *   - The Moonraker API key is resolved per call via `ctx.secrets.resolve`.
- *   - Plaintext is never logged, cached beyond a single request, written to
- *     state, or echoed into the connection-state stream.
+ * Secret handling rules:
+ *   - The Moonraker API key arrives PRE-RESOLVED (the worker resolves the
+ *     configured ref once per config application, inside the host's scoped
+ *     config push); this client makes NO `ctx.secrets` calls, so WS
+ *     reconnects and background REST reads can never fire an unscoped
+ *     worker→host RPC.
+ *   - Plaintext is never logged, written to state, or echoed into the
+ *     connection-state stream; it is refreshed on every config application.
  *   - Outbound traffic is restricted to the configured base URL — every URL
  *     this client builds is checked against the base host before fetching.
  */
 import { randomBytes } from "node:crypto";
 import type {
   PluginHttpClient,
-  PluginSecretsClient,
   PluginLogger,
 } from "@paperclipai/plugin-sdk";
-import { resolveSecretRef, type SecretRef } from "./secretRef.js";
 
 /** Subset of Moonraker printer objects the dashboard widget cares about. */
 export const DEFAULT_SUBSCRIBED_OBJECTS = {
@@ -148,13 +150,18 @@ export interface MoonrakerClientOptions {
   /** Base URL (e.g. `http://printer.lan` or `http://printer.lan:7125`). */
   baseUrl: string;
   /**
-   * Secret ref for the Moonraker API key. Optional for unauthenticated
-   * instances. Accepts both the legacy string shape and the object binding
-   * ref; passed to `ctx.secrets.resolve` exactly as configured.
+   * PRE-RESOLVED Moonraker API key, or `null` for unauthenticated
+   * instances. The worker resolves the configured ref once per config
+   * application — inside the host's scoped `configChanged` push — and fails
+   * closed when resolution fails, so a configured client never runs without
+   * its credential. Held in memory only; never logged, never persisted, and
+   * refreshed on every config application via `applyCredential()`. The
+   * client itself makes NO worker→host calls: the WS (re)connect loop reads
+   * the in-memory value, so a 3am reconnect outside any dispatch can never
+   * leak an unscoped `secrets.resolve` RPC.
    */
-  apiKeyRef?: SecretRef;
+  apiKey: string | null;
   http: PluginHttpClient;
-  secrets: PluginSecretsClient;
   logger: PluginLogger;
   reconnect?: ReconnectOptions;
   /** Objects to subscribe to on connect. Defaults to the dashboard set. */
@@ -285,6 +292,8 @@ export class MoonrakerClient {
     updatedAt: null,
     connection: { state: "idle", attempts: 0 },
   };
+  /** Pre-resolved API key (null = unauthenticated); swapped on re-apply. */
+  private apiKey: string | null;
   private ws: WebSocketLike | null = null;
   private wsRpcId = 0;
   private pendingRpc = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
@@ -293,6 +302,7 @@ export class MoonrakerClient {
 
   constructor(private readonly opts: MoonrakerClientOptions) {
     this.baseUrl = new URL(opts.baseUrl);
+    this.apiKey = opts.apiKey;
     this.wsUrl = this.buildWsBaseUrl();
     this.reconnect = { ...DEFAULT_RECONNECT, ...(opts.reconnect ?? {}) };
     this.subscribedObjects = opts.subscribedObjects ?? { ...DEFAULT_SUBSCRIBED_OBJECTS };
@@ -531,13 +541,25 @@ export class MoonrakerClient {
   // ── Internal helpers ─────────────────────────────────────────────────────
 
   /**
-   * Resolve API key once and pass it to the caller. Caller is responsible for
-   * NOT logging it. The string is held in a local for the lifetime of one
-   * call and dropped on return.
+   * In-memory API key read. NEVER a worker→host call: resolution moved to
+   * the worker's config-apply path so WS reconnects and background REST
+   * reads cannot fire an unscoped `secrets.resolve` RPC (which the host
+   * attributes single-in-flight and permanently denies when nothing is in
+   * flight). Caller is responsible for NOT logging it. The string is held
+   * in a local for the lifetime of one call and dropped on return.
    */
-  private async resolveApiKey(): Promise<string | null> {
-    if (!this.opts.apiKeyRef) return null;
-    return resolveSecretRef(this.opts.secrets, this.opts.apiKeyRef);
+  private apiKeyCredential(): string | null {
+    return this.apiKey;
+  }
+
+  /**
+   * Swap in a freshly resolved API key (worker config re-application).
+   * `null` reverts to unauthenticated. Applies to every subsequent REST
+   * request and WS (re)connect; the current WS connection keeps the token
+   * it connected with until the next (re)connect.
+   */
+  applyCredential(credential: string | null): void {
+    this.apiKey = credential;
   }
 
   private async requestJson<T>(
@@ -552,7 +574,7 @@ export class MoonrakerClient {
     } = {},
   ): Promise<T> {
     const url = this.scopedUrl(path);
-    const apiKey = await this.resolveApiKey();
+    const apiKey = this.apiKeyCredential();
     const headers: Record<string, string> = {
       Accept: "application/json",
       ...(init.headers ?? {}),
@@ -657,7 +679,7 @@ export class MoonrakerClient {
   private async connectOnce(): Promise<void> {
     if (this.stopped) return;
     this.setConnectionState({ state: this.connection.attempts > 0 ? "reconnecting" : "connecting" });
-    const apiKey = await this.resolveApiKey();
+    const apiKey = this.apiKeyCredential();
     const wsUrl = new URL(this.wsUrl.toString());
     if (apiKey) {
       wsUrl.searchParams.set("token", apiKey);

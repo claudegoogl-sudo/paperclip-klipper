@@ -430,7 +430,7 @@ describe("FileList (§6.4 §3, against MockMoonraker fixture)", () => {
     client = new MoonrakerClient({
       baseUrl: mock.baseUrl(),
       http: harness.ctx.http,
-      secrets: harness.ctx.secrets,
+      apiKey: null,
       logger: harness.ctx.logger,
     });
     fixtureFiles = await client.listFiles("gcodes");

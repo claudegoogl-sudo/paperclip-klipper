@@ -14,6 +14,7 @@ import {
 import { validateMoonrakerBaseUrl } from "./worker/validateMoonrakerBaseUrl.js";
 import {
   canonicalSecretRefIdentity,
+  resolveSecretRef,
   type SecretRef,
 } from "./worker/secretRef.js";
 import { FlashForgeClient } from "./worker/transports/FlashForgeClient.js";
@@ -45,20 +46,36 @@ import type { PrinterTransport } from "./worker/transports/PrinterTransport.js";
  *   - Connection-state and status snapshots are pushed to the `klipper`
  *     stream channel so `usePluginStream("klipper")` in the UI updates live.
  *
- * Boot-time config semantics (host replay):
+ * Boot-time config semantics (host replay only — no setup-time reads):
  *   The host spawns plugin workers with an EMPTY bootstrap config; company
  *   config rows are delivered right after boot through the `configChanged`
- *   RPC, and `ctx.config.get()` from setup() runs in service scope with no
- *   company attached — the host denies it ("company context is required").
- *   A denial is NOT fatal here: setup treats it as "config unknown", stays
- *   permissive (tools/data/actions registered, returning
- *   `prerequisite_missing`), and the host's startup config replay — or a
+ *   RPC. setup() therefore makes NO `ctx.config.get()` call at all: a
+ *   worker→host call from setup runs in service scope with no company
+ *   attached and NOTHING in flight, and the host's single-in-flight
+ *   attribution permanently denies ("poisons") the method for the worker's
+ *   lifetime — which used to make every in-dispatch `config.get` fail with
+ *   InvocationScopeDeniedError and silently fail the opt-in gates closed.
+ *   setup() boots permissive (tools/data/actions registered, returning
+ *   `prerequisite_missing`) and the host's startup config replay — or a
  *   later operator config save — lands in `onConfigChanged`, which applies
- *   the config and starts the Moonraker client. This mirrors the boot path
- *   of the other first-party long-running plugin workers on this host. The
- *   authz is never bypassed: a denied read yields UNKNOWN config, never a
- *   guessed or stale one, and the opt-in tool gates keep re-reading config
- *   per dispatch (fail-closed) regardless.
+ *   the config and starts the transport client. The opt-in tool gates keep
+ *   re-reading config per dispatch (fail-closed); those reads run INSIDE a
+ *   dispatch, where single-in-flight attribution attributes them correctly.
+ *
+ * Credential semantics (resolve at config application only):
+ *   For the same reason, `ctx.secrets.resolve` is NEVER called outside a
+ *   config application. The status poll, WS reconnect loop, health probes,
+ *   and UI data keys all run outside dispatches; a per-request/per-cycle
+ *   resolve from any of them poisons the method the same way. Instead,
+ *   `applyConfig` resolves the configured secret ref ONCE per config
+ *   application — the `configChanged` RPC runs inside the host's scoped
+ *   push, so that call is attributed and company-scoped — and hands the
+ *   plaintext to the transport client, which holds it in memory only. The
+ *   cache never outlives the config that produced it: every application
+ *   (including unchanged-fingerprint replays) re-resolves and swaps the
+ *   value in. A resolve failure is fail-closed: no client is built (or the
+ *   live one is stopped), tools return `prerequisite_missing`, and the
+ *   reason is logged without any credential material.
  */
 
 /**
@@ -101,10 +118,11 @@ export interface KlipperWorker {
   client: PrinterTransport | null;
   config: KlipperConfig;
   /**
-   * `false` while the setup-time read was denied (service context) and no
-   * host config replay / operator save has landed yet. Surfaced through
-   * `onHealth` so a worker that booted unconfigured is distinguishable from
-   * one the operator configured with no `moonrakerBaseUrl`.
+   * `false` until the host config replay / operator save lands (setup
+   * makes no config read at all — see the boot-semantics note at the top
+   * of this file). Surfaced through `onHealth` so a worker that booted
+   * unconfigured is distinguishable from one the operator configured with
+   * no `moonrakerBaseUrl`.
    */
   configKnown: boolean;
   /**
@@ -181,25 +199,17 @@ export async function createKlipperWorker(
   ctx: PluginContext,
   options: CreateKlipperWorkerOptions = {},
 ): Promise<KlipperWorker> {
-  // Best-effort setup-time read. Hosts spawn workers with an empty bootstrap
-  // config and replay company rows via `configChanged` right after boot, so
-  // a setup-time `ctx.config.get()` is denied in service scope ("company
-  // context is required"). A denial means UNKNOWN config — never fatal. The
-  // worker boots permissive (surface registered, tools return
-  // `prerequisite_missing`) and `applyConfig` starts the client when the
-  // replay lands. Same semantics as the messenger worker's boot path.
-  let setupConfigKnown = false;
-  let rawConfig: Partial<KlipperConfig> = {};
-  try {
-    rawConfig = ((await ctx.config.get()) ?? {}) as Partial<KlipperConfig>;
-    setupConfigKnown = true;
-  } catch (err) {
-    ctx.logger.warn(
-      "setup: config.get denied (service-context semantics); waiting for the host config replay — worker stays ready and tools return prerequisite_missing until config lands",
-      { pluginId: "platform.klipper", reason: err instanceof Error ? err.message : String(err) },
-    );
-  }
-
+  // NO setup-time `ctx.config.get()` — not even a best-effort one wrapped in
+  // try/catch. A worker→host call from setup runs with no dispatch in
+  // flight, and the host's single-in-flight attribution permanently denies
+  // the method ("idlessCallsSeenWithNoDispatch"): the first denied setup
+  // read poisoned `config.get` for the worker's whole lifetime, so every
+  // later in-dispatch gate re-read failed closed and uploads were refused
+  // with a misleading "auto_upload_artifacts is false" even though the
+  // persisted config was correct. Config reaches this worker exclusively
+  // through `onConfigChanged` (the boot replay + operator saves) — the same
+  // contract the host actually implements. Until it lands the worker stays
+  // permissive: surface registered, tools return `prerequisite_missing`.
   const clientOverrides = options.clientOverrides ?? {};
   const flashforgeClientOverrides = options.flashforgeClientOverrides ?? {};
 
@@ -212,6 +222,9 @@ export async function createKlipperWorker(
       // like an absent config and degrade permissively.
       const config: Partial<KlipperConfig> =
         nextConfig && typeof nextConfig === "object" ? nextConfig : {};
+      // Any config application ends the "booted unconfigured" state — this
+      // is the only path config ever arrives by (no setup-time read).
+      handle.configKnown = true;
       // Fingerprint the PREVIOUS connection identity (kind-aware: a live
       // flashforge client must be compared with the flashforge fingerprint,
       // not the moonraker one) before overwriting the display config, so the
@@ -242,8 +255,30 @@ export async function createKlipperWorker(
         return;
       }
 
+      // Stop any live client and degrade to the permissive surface. Shared
+      // by the fail-closed paths below (missing/invalid config, unresolved
+      // credential): no transport ever runs unscoped or uncredentialed.
+      const stopAndDegrade = (): void => {
+        if (handle.client) {
+          const old = handle.client;
+          handle.client = null;
+          old.stop();
+        }
+        registerRpcSurface(ctx, { config: config as KlipperConfig, client: null });
+      };
+
       if (selection.kind === "moonraker") {
       const rawBaseUrl = config.moonrakerBaseUrl;
+
+      // ── Credential resolution (config-apply scope ONLY) ─────────────────
+      // `ctx.secrets.resolve` is called here and nowhere else in the worker
+      // lifecycle: applyConfig runs inside the host's scoped config push
+      // (`configChanged` RPC), where worker→host calls carry the applying
+      // company's context. A resolve from the status poll, WS reconnect,
+      // UI data keys, or actions would be id-less with nothing in flight
+      // and permanently poison the method (single-in-flight attribution —
+      // see the boot-semantics note at the top of this file). The resolved
+      // plaintext is handed to the client in memory and never logged.
       if (!rawBaseUrl) {
         // Config applied with no baseUrl: degrade to permissive init. Stop any
         // live client so a stale transport can never outlive its config.
@@ -288,12 +323,32 @@ export async function createKlipperWorker(
       }
       const baseUrl = validated.url.toString();
 
+      let moonrakerApiKey: string | null = null;
+      if (config.moonrakerApiKeyRef !== undefined && config.moonrakerApiKeyRef !== null) {
+        try {
+          moonrakerApiKey = await resolveSecretRef(ctx.secrets, config.moonrakerApiKeyRef);
+        } catch (err) {
+          // Fail closed: no transport runs without its credential, and a
+          // live client whose secret just stopped resolving is stopped too.
+          ctx.logger.warn(
+            "paperclip-klipper could not resolve the Moonraker API key ref — refusing to run the transport without a credential (fail closed); fix the secret and save the config again",
+            { pluginId: "platform.klipper", source, reason: err instanceof Error ? err.message : String(err) },
+          );
+          stopAndDegrade();
+          return;
+        }
+      }
+
       const fingerprint = connectionFingerprint(config);
       if (handle.client && prevFingerprint === fingerprint) {
         // Same connection identity (per-company replay burst at boot, or an
-        // operator save that only touched gate flags) — keep the live client.
-        // Always re-register so the `config` data key reflects the latest
-        // snapshot; handler re-registration replaces by key (idempotent).
+        // operator save that only touched gate flags) — keep the live client,
+        // but ALWAYS refresh the credential: every config application
+        // re-resolves, so the cached value never outlives the config that
+        // produced it (a rotated secret on an unchanged ref is picked up at
+        // the next save/replay). Re-register so the `config` data key
+        // reflects the latest snapshot; re-registration replaces by key.
+        handle.client.applyCredential(moonrakerApiKey);
         registerRpcSurface(ctx, { config: config as KlipperConfig, client: handle.client });
         ctx.logger.debug("klipper.config_replay_unchanged", { pluginId: "platform.klipper", source });
         return;
@@ -312,9 +367,8 @@ export async function createKlipperWorker(
 
       const client = new MoonrakerClient({
         baseUrl,
-        apiKeyRef: config.moonrakerApiKeyRef,
+        apiKey: moonrakerApiKey,
         http: ctx.http,
-        secrets: ctx.secrets,
         logger: ctx.logger,
         onStatus: (snapshot: MoonrakerStatusSnapshot) => {
           try {
@@ -392,9 +446,36 @@ export async function createKlipperWorker(
         return;
       }
       const ff = ffValidated.config;
+
+      // ── Credential resolution (config-apply scope ONLY) ─────────────────
+      // Resolve the check-code ref ONCE per config application. The
+      // status poll previously resolved it per cycle — every ~10s, almost
+      // always with no dispatch in flight — which permanently poisoned
+      // `secrets.resolve` for the worker (single-in-flight attribution)
+      // and took the transport down with `flashforge.poll.failed`. The
+      // poll, health probes, and UI data keys now read the value resolved
+      // HERE, inside the host's scoped push; the plaintext is held in the
+      // client's memory only and never logged.
+      let checkCode: string;
+      try {
+        checkCode = await resolveSecretRef(ctx.secrets, ff.checkCodeRef);
+      } catch (err) {
+        // Fail closed: no transport runs without its credential, and a
+        // live client whose secret just stopped resolving is stopped too.
+        ctx.logger.warn(
+          "paperclip-klipper could not resolve the flashforge check-code ref — refusing to run the transport without a credential (fail closed); fix the secret and save the config again",
+          { pluginId: "platform.klipper", source, reason: err instanceof Error ? err.message : String(err) },
+        );
+        stopAndDegrade();
+        return;
+      }
+
       const fingerprint = flashforgeFingerprint(config);
       if (handle.client && prevFingerprint === fingerprint) {
-        // Same connection identity — keep the live client (replay burst).
+        // Same connection identity — keep the live client (replay burst),
+        // still refreshing the credential (see the moonraker branch note:
+        // the cache never outlives the config that produced it).
+        handle.client.applyCredential(checkCode);
         registerRpcSurface(ctx, { config: config as KlipperConfig, client: handle.client });
         ctx.logger.debug("klipper.config_replay_unchanged", { pluginId: "platform.klipper", source });
         return;
@@ -415,9 +496,8 @@ export async function createKlipperWorker(
       const client = new FlashForgeClient({
         baseUrl: ff.baseUrl,
         serialNumber: ff.serialNumber,
-        checkCodeRef: ff.checkCodeRef,
+        checkCode,
         http: ctx.http,
-        secrets: ctx.secrets,
         logger: ctx.logger,
         onStatus: (snapshot: MoonrakerStatusSnapshot) => {
           try {
@@ -481,21 +561,15 @@ export async function createKlipperWorker(
     });
   });
 
-  handle.configKnown = setupConfigKnown;
-  if (setupConfigKnown) {
-    // Config readable at setup (permissive hosts / company-scoped boot):
-    // identical to the historical behavior — build and start the client now.
-    await handle.applyConfig(rawConfig, "setup", options.autoStart !== false);
-  } else {
-    // Denied setup read: config is UNKNOWN (not "empty"). Register the
-    // permissive surface so tools/data/actions exist and return
-    // `prerequisite_missing`; `onConfigChanged` applies the host replay.
-    registerRpcSurface(ctx, { config: {} as KlipperConfig, client: null });
-    ctx.logger.warn(
-      "paperclip-klipper running without config (host denied the setup-time read); connection stays down until the host config replay or an operator save lands",
-      { pluginId: "platform.klipper" },
-    );
-  }
+  // Config is UNKNOWN at boot (no setup read — see top-of-file note).
+  // Register the permissive surface so tools/data/actions exist and return
+  // `prerequisite_missing`; `onConfigChanged` applies the host replay.
+  handle.configKnown = false;
+  registerRpcSurface(ctx, { config: {} as KlipperConfig, client: null });
+  ctx.logger.info(
+    "paperclip-klipper booted without a config read (by design: setup makes no worker→host calls); connection stays down until the host config replay or an operator save lands",
+    { pluginId: "platform.klipper" },
+  );
 
   return handle;
 }
@@ -528,9 +602,7 @@ const plugin = definePlugin({
     const ctx = activeCtx;
     if (!worker || !ctx) return;
     try {
-      // A replay/save is an authoritative, company-resolved snapshot — the
-      // "unknown" state from a denied setup read ends here.
-      worker.configKnown = true;
+      // A replay/save is an authoritative, company-resolved snapshot.
       await worker.applyConfig(
         (newConfig ?? {}) as Partial<KlipperConfig>,
         "configChanged",

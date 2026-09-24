@@ -42,6 +42,18 @@ export interface TransportHealthReport {
 export interface PrinterTransport {
   /** Which transport this instance implements. */
   readonly kind: PrinterTransportKind;
+  /**
+   * Swap in a freshly resolved transport credential (the worker resolves
+   * the configured secret ref once per config application and pushes the
+   * value here). `null` means "unauthenticated" (Moonraker without an API
+   * key). Implementations hold the value in memory only and must never log
+   * it. Transports NEVER resolve credentials themselves: a client that
+   * called `ctx.secrets.resolve` from its background loop (status poll, WS
+   * reconnect, UI data keys) would fire worker→host RPCs with no dispatch
+   * in flight, which the host's single-in-flight attribution permanently
+   * denies — poisoning the method for the worker's lifetime.
+   */
+  applyCredential(credential: string | null): void;
   /** Current connection state, cheap to read. */
   getConnectionState(): ConnectionStateSnapshot;
   /**

@@ -16,10 +16,14 @@ import type { PaperclipPluginManifestV1 } from "@paperclipai/plugin-sdk";
  *                              enforces the configured printer base URL as
  *                              the only permitted host for the active
  *                              transport.
- *   - secrets.read-ref       — resolve the Moonraker API key per call via
- *                              `ctx.secrets.resolve(config.moonrakerApiKeyRef)`.
- *                              The plaintext value is NEVER cached, logged, or
- *                              persisted in plugin state.
+ *   - secrets.read-ref       — resolve the Moonraker API key (and the
+ *                              FlashForge check code) via
+ *                              `ctx.secrets.resolve(...)`. Resolution happens
+ *                              ONCE per config application (boot replay /
+ *                              operator save — the host's scoped push) and
+ *                              the plaintext is held in worker memory only:
+ *                              never logged, never persisted, refreshed at
+ *                              every config application.
  *   - agent.tools.register   — register agent tools (stub bodies at this
  *                              phase; real implementations land in 6.5).
  *   - events.subscribe       — subscribe to host events the worker will react
@@ -105,8 +109,9 @@ const manifest: PaperclipPluginManifestV1 = {
   //     the Moonraker API key and the FlashForge check code. Accepted as the
   //     legacy string ref or the object binding ref
   //     { type: "secret_ref", secretId, version? } — current hosts persist
-  //     the object shape as a company-scoped binding at config-save time and
-  //     resolve it per call; the plaintext value never reaches config,
+  //     the object shape as a company-scoped binding at config-save time;
+  //     the worker resolves the configured ref once per config application
+  //     and keeps the plaintext in memory only — it never reaches config,
   //     state, or logs. Optional per transport.
   //   - auto_upload_artifacts: when true, the worker may auto-upload
   //     produced G-code artifacts to the printer. Default off so the
@@ -170,10 +175,12 @@ const manifest: PaperclipPluginManifestV1 = {
           "secretId, version? } that current hosts persist as a " +
           "company-scoped binding when this config is saved (the object " +
           "shape is what the host settings UI submits). Either shape is " +
-          "resolved per call via ctx.secrets.resolve; the plaintext value " +
-          "is never stored, logged, or cached. A missing/unresolvable ref " +
-          "refuses the transport at load (fail closed). Omit for " +
-          "unauthenticated Moonraker instances.",
+          "resolved by the worker once per config application (boot replay " +
+          "or operator save) and held in worker memory only — never stored " +
+          "or logged; a rotation takes effect at the next config save or " +
+          "worker restart. A missing/unresolvable ref refuses the transport " +
+          "at load (fail closed). Omit for unauthenticated Moonraker " +
+          "instances.",
       },
       flashforgeBaseUrl: {
         type: "string",
@@ -216,10 +223,11 @@ const manifest: PaperclipPluginManifestV1 = {
           "secretId, version? } that current hosts persist as a " +
           "company-scoped binding when this config is saved (the object " +
           "shape is what the host settings UI submits). Either shape is " +
-          "resolved per request via ctx.secrets.resolve; the check code is " +
-          "never stored in plaintext, never cached, and never logged. A " +
-          "missing/unresolvable ref refuses the transport at load (fail " +
-          "closed).",
+          "resolved by the worker once per config application (boot replay " +
+          "or operator save) and held in worker memory only — never stored " +
+          "or logged; a rotation takes effect at the next config save or " +
+          "worker restart. A missing/unresolvable ref refuses the transport " +
+          "at load (fail closed).",
       },
       auto_upload_artifacts: {
         type: "boolean",
