@@ -61,6 +61,11 @@ const GCODE = new Uint8Array([0x47, 0x31, 0x20, 0x58, 0x31, 0x30, 0x0a]); // "G1
 function artifactCtx() {
   return {
     artifacts: {
+      // fork51 ToolRunContextArtifactsClient types both verbs; only fetch
+      // is ever exercised on this path.
+      async create() {
+        throw new Error("artifacts.create is not used by this plugin");
+      },
       async fetch() {
         return {
           bytes: GCODE,

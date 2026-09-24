@@ -133,7 +133,7 @@ function buildHarness(opts: {
   };
   registerRpcSurface(stub as PluginContext, {
     config: configStore as unknown as KlipperConfig,
-    client: fakeClient as never,
+    getClient: () => fakeClient as never,
     camera: opts.camera ?? null,
     maxInflatedGcodeBytes: opts.maxInflatedGcodeBytes,
   });
