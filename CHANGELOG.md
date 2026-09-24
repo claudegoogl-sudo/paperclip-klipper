@@ -5,6 +5,33 @@ plugin follows semver against the host plugin API (PLA-526 keeps
 `package.json.version` and the manifest version in lockstep via the build
 `define`).
 
+## 0.2.7 — 2026-09-24
+
+### Added
+- **The printer page now receives a live status stream.** The worker opens
+  its status stream channel inside the first credentialed tool dispatch
+  (the moment the transport loop starts with the dispatching company's
+  identity) and keeps it open while the transport runs, so the page's
+  `usePluginStream` subscription receives status and connection-state
+  events pushed from the transport's poll/reconnect callbacks. The host
+  pins the channel to the dispatching company from the echoed invocation
+  scope — the worker never claims the attribution itself — and every later
+  out-of-dispatch emit is tenant-verified against that pin. A dispatch
+  from another company re-points the stream to that company (the worker
+  holds one transport; the stream follows the dispatch), and stopping the
+  transport closes the channel so the subscription sees the stream end
+  instead of silently starving.
+
+### Changed
+- Vendored plugin SDK refreshed to the 2026.924.1-fork51.1 generation:
+  every worker→host notification echoes the host-issued invocation id
+  (the stream pin's authorization path), and the host's
+  `streams.dropped` signal is forwarded to the plugin log so a dropped
+  emit is worker-visible instead of silent.
+- `upload_gcode` now refuses with a reportable tool error when the host
+  dispatches without an artifacts client (older host generations) instead
+  of crashing the handler.
+
 ## 0.2.6 — 2026-09-24
 
 ### Added
