@@ -12,4 +12,4 @@ onlyBuiltDependencies:
 # `@paperclipai/plugin-sdk` (its transitive dependency), so installs resolve
 # byte-identically from `.paperclip-sdk/` without relying on registry state.
 overrides:
-  '@paperclipai/shared': 'file:.paperclip-sdk/paperclipai-shared-2026.924.1-fork51.1.tgz'
+  '@paperclipai/shared': 'file:.paperclip-sdk/paperclipai-shared-2026.924.1-fork51.2.tgz'
