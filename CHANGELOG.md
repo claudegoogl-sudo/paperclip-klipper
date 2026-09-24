@@ -40,6 +40,17 @@ plugin follows semver against the host plugin API (PLA-526 keeps
   rebuilds also keep the worker's config identity in sync, so the next
   apply of the previous company's row correctly replaces the connection
   instead of misreading it as an unchanged replay.
+- **The credentialed fast path re-verifies the HELD client's identity
+  (C1b, same cross-tenant class as the unauth guard).** The resolution
+  cache is keyed to the config fingerprint, not to the client — and an
+  interleaved dispatch from another company can replace the held client
+  (e.g. the unauth rebuild above) without touching the cache. Company
+  A(resolved) → company B(unauth rebuild) → company A used to fast-path
+  onto B's client and upload to / print on B's printer until the next
+  config application. The fast path now requires the same
+  connection-identity predicate as the resolve path and falls through to
+  the full in-dispatch resolve on mismatch; the unauth rebuild also drops
+  any surviving cache entry (the transport holds no plaintext after it).
 - **upload_gcode order is gate → validate → resolve** (matching
   start_print): a malformed filename or subdirectory is refused before any
   credential resolve or transport start — a malformed call never spends a
