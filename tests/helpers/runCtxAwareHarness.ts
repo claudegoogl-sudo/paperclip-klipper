@@ -1,12 +1,14 @@
 /**
- * fork51-generation SDK testing-harness adapter.
+ * Vendored-SDK testing-harness adapter.
  *
- * The 2026.923.1-fork51 harness projects `executeTool`'s runCtx down to the
- * four identity fields (agentId/runId/companyId/projectId) and drops
- * everything else. Production injects `runCtx.artifacts` inside
- * `handleExecuteTool`, but the harness never does — so specs that stub
- * `artifacts` (every upload-path spec) would silently receive `undefined`
- * and fail with "Cannot read properties of undefined (reading 'fetch')".
+ * The vendored SDK generation (the tarball pair pinned in `package.json` /
+ * `.paperclip-sdk/` — currently 2026.924.1-fork51.2) projects
+ * `executeTool`'s runCtx down to the four identity fields
+ * (agentId/runId/companyId/projectId) and drops everything else. Production
+ * injects `runCtx.artifacts` inside `handleExecuteTool`, but the harness
+ * never does — so specs that stub `artifacts` (every upload-path spec)
+ * would silently receive `undefined` and fail with "Cannot read properties
+ * of undefined (reading 'fetch')".
  *
  * This wrapper restores the previous pass-through contract: the caller's
  * runCtx (identity fields + artifact stubs) is merged over the identity

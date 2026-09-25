@@ -21,12 +21,20 @@
  *   - stopping the transport (config replacement) closes the channel
  *     exactly once, and nothing is closed when no channel was opened;
  *   - an unchanged replay keeps the live transport AND the open channel;
+ *   - a host `streams.dropped` for the channel (open/pin-class reason)
+ *     resets the local pin mirror, so the next same-company dispatch
+ *     re-opens the channel instead of deduping against a pin the host
+ *     never recorded (fire-and-forget open lost → self-healing re-open);
+ *   - a dispatch from ANOTHER company with an UNCHANGED connection
+ *     identity re-points the channel IN PLACE — no second transport — and
+ *     the whole path still spends zero extra host calls;
  *   - the whole lifecycle spends ZERO extra worker→host calls: open/close
  *     are one-way notifications, so resolve/config counters and outbound
  *     printer traffic match the pre-stream baseline exactly.
  */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createTestHarness, type TestHarness } from "@paperclipai/plugin-sdk/testing";
+import type { StreamDropNotice } from "@paperclipai/plugin-sdk";
 import manifest from "../../src/manifest.js";
 import { createKlipperWorker } from "../../src/worker.js";
 import { bootWithReplay } from "../helpers/replayBoot.js";
@@ -52,13 +60,19 @@ const COMPANY_B = "22222222-2222-4222-8222-222222222222";
 
 type StreamCall = { method: string; channel: string; companyId: string };
 
-/** Wrap ctx.streams with recorders; also count the host calls the lifecycle must not spend. */
+/**
+ * Wrap ctx.streams with recorders; also count the host calls the lifecycle
+ * must not spend, and capture `streams.onDropped` registrations so specs can
+ * simulate host drop feedback via `fireDrop` (the harness has no host to
+ * send real `streams.dropped` notifications).
+ */
 function recordStreamLifecycle(harness: TestHarness) {
   const calls: StreamCall[] = [];
   const streams = harness.ctx.streams;
   const origOpen = streams.open.bind(streams);
   const origEmit = streams.emit.bind(streams);
   const origClose = streams.close.bind(streams);
+  const dropHandlers = new Set<(notice: StreamDropNotice) => void>();
   harness.ctx.streams = {
     open: (channel: string, companyId: string) => {
       calls.push({ method: "open", channel, companyId });
@@ -76,7 +90,16 @@ function recordStreamLifecycle(harness: TestHarness) {
       calls.push({ method: "close", channel, companyId: "" });
       origClose(channel);
     },
+    onDropped: (handler: (notice: StreamDropNotice) => void) => {
+      dropHandlers.add(handler);
+      return () => {
+        dropHandlers.delete(handler);
+      };
+    },
   } as typeof harness.ctx.streams;
+  const fireDrop = (notice: StreamDropNotice): void => {
+    for (const handler of [...dropHandlers]) handler(notice);
+  };
   const configGets: number[] = [];
   const secretResolves: unknown[] = [];
   const origGet = harness.ctx.config.get.bind(harness.ctx.config.get);
@@ -89,7 +112,7 @@ function recordStreamLifecycle(harness: TestHarness) {
     secretResolves.push(ref);
     return CHECK_CODE;
   }) as typeof harness.ctx.secrets.resolve;
-  return { stream: calls, configGets, secretResolves };
+  return { stream: calls, configGets, secretResolves, fireDrop };
 }
 
 function artifactCtx() {
@@ -236,6 +259,97 @@ describe("status stream channel lifecycle", () => {
     const opens = stream.filter((c) => c.method === "open");
     expect(opens).toHaveLength(2);
     expect(opens[1].companyId).toBe(COMPANY_B);
+  });
+
+  it("re-points the channel IN PLACE when another company dispatches the same connection identity", async () => {
+    const { harness, worker, stream, configGets, secretResolves } = await bootDormantOnA();
+    await harness.executeTool<{ error?: string }>(
+      "klipper.upload_gcode",
+      { filename: "bracket.gcode", artifactId: ARTIFACT_ID },
+      { ...artifactCtx(), companyId: COMPANY_A, agentId: "agent-A", runId: "run-A" },
+    );
+    expect(stream.filter((c) => c.method === "open")).toHaveLength(1);
+    const transportBefore = worker.client;
+    expect(transportBefore).not.toBeNull();
+
+    // Company B dispatches the SAME printer (identical connection identity,
+    // no config churn, transport already started): no second transport may
+    // be built, but the channel must follow the dispatch.
+    await harness.executeTool<{ error?: string }>(
+      "klipper.upload_gcode",
+      { filename: "bracket.gcode", artifactId: ARTIFACT_ID },
+      { ...artifactCtx(), companyId: COMPANY_B, agentId: "agent-B", runId: "run-B" },
+    );
+    const opens = stream.filter((c) => c.method === "open");
+    expect(opens).toHaveLength(2);
+    expect(opens[1]).toEqual({ method: "open", channel: "klipper", companyId: COMPANY_B });
+    expect(worker.client).toBe(transportBefore);
+
+    // Still zero extra host calls: the re-point added no config read beyond
+    // the second dispatch's own baseline, and the unchanged credential
+    // fingerprint made the second resolve a cache hit (no host call at all).
+    expect(configGets).toHaveLength(2);
+    expect(secretResolves).toHaveLength(1);
+    await new Promise((r) => setTimeout(r, 40));
+    expect(configGets).toHaveLength(2);
+    expect(secretResolves).toHaveLength(1);
+  });
+
+  it("re-opens the channel after the host drops the open (pin-mirror reset)", async () => {
+    const { harness, stream, fireDrop } = await bootDormantOnA();
+    await harness.executeTool<{ error?: string }>(
+      "klipper.upload_gcode",
+      { filename: "bracket.gcode", artifactId: ARTIFACT_ID },
+      { ...artifactCtx(), companyId: COMPANY_A, agentId: "agent-A", runId: "run-A" },
+    );
+    expect(stream.filter((c) => c.method === "open")).toHaveLength(1);
+
+    // The host dropped our fire-and-forget open (scope validation failure).
+    // The worker's mirror still believes the channel is open — without the
+    // reset this dedupe would suppress every future same-company open and
+    // the stream would stay dead until a transport restart.
+    fireDrop({
+      method: "streams.open",
+      channel: "klipper",
+      companyId: COMPANY_A,
+      reason: "invalid_invocation_scope",
+    });
+    expect(
+      harness.logs.some((l) => l.level === "warn" && l.message === "klipper.stream.pin_mirror_reset"),
+    ).toBe(true);
+
+    // The next SAME-company dispatch re-sends the open: the mirror was reset.
+    await harness.executeTool<{ error?: string }>(
+      "klipper.upload_gcode",
+      { filename: "bracket.gcode", artifactId: ARTIFACT_ID },
+      { ...artifactCtx(), companyId: COMPANY_A, agentId: "agent-A", runId: "run-A-after-drop" },
+    );
+    const opens = stream.filter((c) => c.method === "open");
+    expect(opens).toHaveLength(2);
+    expect(opens[1]).toEqual({ method: "open", channel: "klipper", companyId: COMPANY_A });
+  });
+
+  it("does NOT reset the pin mirror for drops that do not concern the channel", async () => {
+    const { harness, stream, fireDrop } = await bootDormantOnA();
+    await harness.executeTool<{ error?: string }>(
+      "klipper.upload_gcode",
+      { filename: "bracket.gcode", artifactId: ARTIFACT_ID },
+      { ...artifactCtx(), companyId: COMPANY_A, agentId: "agent-A", runId: "run-A" },
+    );
+    expect(stream.filter((c) => c.method === "open")).toHaveLength(1);
+
+    // Another channel's drop (and an unknown-reason emit drop on our channel
+    // with no pin-class signal) must not tear down a healthy mirror.
+    fireDrop({ method: "streams.emit", channel: "other", companyId: COMPANY_A, reason: "pin_mismatch" });
+    fireDrop({ method: "streams.emit", channel: "klipper", companyId: COMPANY_A, reason: "some_future_reason" });
+
+    await harness.executeTool<{ error?: string }>(
+      "klipper.upload_gcode",
+      { filename: "bracket.gcode", artifactId: ARTIFACT_ID },
+      { ...artifactCtx(), companyId: COMPANY_A, agentId: "agent-A", runId: "run-A2" },
+    );
+    // Dedupe held: the same-company dispatch did not re-send the open.
+    expect(stream.filter((c) => c.method === "open")).toHaveLength(1);
   });
 
   it("closes the channel exactly once when the transport stops, and never closes an unopened one", async () => {

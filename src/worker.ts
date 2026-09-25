@@ -342,6 +342,45 @@ export async function createKlipperWorker(
     }
   };
 
+  // ── `streams.dropped` self-healing ─────────────────────────────────────
+  // Stream notifications are fire-and-forget: if the host drops our
+  // `streams.open` (invocation-scope validation failure, pin eviction, …),
+  // the mirror above still records success and the same-company dedupe
+  // would never re-send — the status stream would stay dead for that
+  // company until a transport restart or another company's dispatch
+  // re-pointed it. The host forwards every drop back to the worker (SDK
+  // generation 2026.924.1-fork51.2+), so reset the mirror whenever a drop
+  // names our channel with an open or pin-class reason: the next
+  // credentialed dispatch re-opens (and the host re-validates the pin from
+  // its own dispatch scope — fail-closed, nothing leaks). A drop for
+  // another channel, an unrecognized reason, or a drop while no channel is
+  // mirrored only logs via the SDK's built-in plugin-log warn.
+  const PIN_CLASS_DROP_REASONS = new Set([
+    // Host could not resolve a dispatch scope for the notification.
+    "invalid_invocation_scope",
+    "no_invocation_scope",
+    // The channel pin the host holds diverges from (or is absent against)
+    // this worker's mirror.
+    "pin_mismatch",
+    "unpinned_channel",
+    "company_mismatch",
+    // The server's per-worker pin cap evicted the channel's pin.
+    "pin_cap_exceeded",
+  ]);
+  ctx.streams.onDropped((drop) => {
+    if (drop.channel !== STREAM_CHANNEL) return;
+    const pinClass =
+      drop.method === "streams.open" || PIN_CLASS_DROP_REASONS.has(drop.reason ?? "");
+    if (!pinClass || statusChannelCompanyId === null) return;
+    ctx.logger.warn("klipper.stream.pin_mirror_reset", {
+      pluginId: "platform.klipper",
+      channel: STREAM_CHANNEL,
+      droppedMethod: drop.method ?? "unknown",
+      reason: drop.reason ?? "unknown",
+    });
+    statusChannelCompanyId = null;
+  });
+
   /**
    * Stop a transport and tear the status stream channel down with it: a
    * stopped printer pushes no status, and the UI subscription should see
