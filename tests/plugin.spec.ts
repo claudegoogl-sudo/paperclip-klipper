@@ -138,7 +138,9 @@ describe("paperclip-klipper RPC surface", () => {
       "klipper.get_printer_status",
       {},
     );
-    expect(result.data?.connection.state).toBe("idle");
+    // 0.2.10: the status tool resolves the dispatching company's transport
+    // in-dispatch, so the (unauthenticated) Moonraker transport is started.
+    expect(result.data?.connection.state).not.toBe("idle");
   });
 
   it("refresh action fetches /printer/info via the mock", async () => {
