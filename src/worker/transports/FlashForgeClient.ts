@@ -404,10 +404,12 @@ export class FlashForgeClient implements PrinterTransport {
   /**
    * Upload G-code via POST /uploadGcode.
    *
-   * The plugin-sdk RPC channel stringifies non-string bodies (see
-   * MoonrakerClient.uploadGcode), so the multipart envelope is hand-rolled
-   * with a latin1-encoded string and an explicit Content-Type, exactly like
-   * the Moonraker upload. Field name is `gcodeFile` per the reference
+   * The multipart envelope is hand-rolled as a Buffer with an explicit
+   * Content-Type, exactly like the Moonraker upload. The body MUST stay
+   * bytes: the SDK sends a string body as UTF-8, which turns every byte
+   * >= 0x80 into two bytes (file part longer than the `fileSize` header ->
+   * printer answers "Send file error"). A Buffer goes over the RPC channel
+   * as base64 and is decoded byte-exact by the host. Field name is `gcodeFile` per the reference
    * client.
    *
    * SECURITY: `printNow` is hard-coded "false". There is no parameter, no
@@ -429,17 +431,16 @@ export class FlashForgeClient implements PrinterTransport {
 
     const boundary = `----paperclipFormBoundary${randomBytes(12).toString("hex")}`;
     const CRLF = "\r\n";
-    const payloadStr = Buffer.from(bytes).toString("latin1");
-    const parts: string[] = [];
-    parts.push(`--${boundary}${CRLF}`);
-    parts.push(
-      `Content-Disposition: form-data; name="gcodeFile"; filename="${filename}"${CRLF}`,
-    );
-    parts.push(`Content-Type: application/octet-stream${CRLF}${CRLF}`);
-    parts.push(payloadStr);
-    parts.push(CRLF);
-    parts.push(`--${boundary}--${CRLF}`);
-    const body = parts.join("");
+    const head =
+      `--${boundary}${CRLF}` +
+      `Content-Disposition: form-data; name="gcodeFile"; filename="${filename}"${CRLF}` +
+      `Content-Type: application/octet-stream${CRLF}${CRLF}`;
+    const tail = `${CRLF}--${boundary}--${CRLF}`;
+    const body = Buffer.concat([
+      Buffer.from(head, "utf8"),
+      Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength),
+      Buffer.from(tail, "utf8"),
+    ]);
 
     const checkCode = this.requireCredential();
     const headers: Record<string, string> = {

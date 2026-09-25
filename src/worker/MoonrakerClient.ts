@@ -383,10 +383,11 @@ export class MoonrakerClient {
    * Moonraker is `HTTP 500 ParseFailedException: Missing Content-Type
    * header`.
    *
-   * Fix: hand-roll the multipart body as a string and pass the matching
-   * `Content-Type` header explicitly. Bytes flow through as a latin1-encoded
-   * string so the SDK serializer is an identity pass-through; G-code is
-   * printable ASCII so the latin1↔UTF-8 trip is lossless.
+   * Fix: hand-roll the multipart body as a Buffer and pass the matching
+   * `Content-Type` header explicitly. The body must stay bytes: the SDK
+   * sends a string body as UTF-8, so a latin1 string would turn every byte
+   * >= 0x80 into two bytes (slicer comments often carry non-ASCII). A Buffer
+   * goes over the RPC channel as base64 and the host decodes it byte-exact.
    *
    * The host enforces `http.outbound`; the worker enforces the host scope.
    */
@@ -401,32 +402,27 @@ export class MoonrakerClient {
 
     const boundary = `----paperclipFormBoundary${randomBytes(12).toString("hex")}`;
     const CRLF = "\r\n";
-    // latin1 maps bytes 0x00-0xFF 1:1 into JS string code units, so the SDK's
-    // `String(body)` serializer is a no-op for transport. The host writes the
-    // string to the wire via Node's default UTF-8 encoder; G-code is ASCII,
-    // which is identical under latin1 and UTF-8.
-    const payloadStr = Buffer.from(bytes).toString("latin1");
-
-    const parts: string[] = [];
-    parts.push(`--${boundary}${CRLF}`);
-    parts.push(
-      `Content-Disposition: form-data; name="file"; filename="${filename}"${CRLF}`,
-    );
-    parts.push(`Content-Type: application/octet-stream${CRLF}${CRLF}`);
-    parts.push(payloadStr);
-    parts.push(CRLF);
+    const head =
+      `--${boundary}${CRLF}` +
+      `Content-Disposition: form-data; name="file"; filename="${filename}"${CRLF}` +
+      `Content-Type: application/octet-stream${CRLF}${CRLF}`;
+    let tail = CRLF;
     if (options.path) {
-      parts.push(`--${boundary}${CRLF}`);
-      parts.push(`Content-Disposition: form-data; name="path"${CRLF}${CRLF}`);
-      parts.push(`${options.path}${CRLF}`);
+      tail += `--${boundary}${CRLF}`;
+      tail += `Content-Disposition: form-data; name="path"${CRLF}${CRLF}`;
+      tail += `${options.path}${CRLF}`;
     }
     if (options.root) {
-      parts.push(`--${boundary}${CRLF}`);
-      parts.push(`Content-Disposition: form-data; name="root"${CRLF}${CRLF}`);
-      parts.push(`${options.root}${CRLF}`);
+      tail += `--${boundary}${CRLF}`;
+      tail += `Content-Disposition: form-data; name="root"${CRLF}${CRLF}`;
+      tail += `${options.root}${CRLF}`;
     }
-    parts.push(`--${boundary}--${CRLF}`);
-    const body = parts.join("");
+    tail += `--${boundary}--${CRLF}`;
+    const body = Buffer.concat([
+      Buffer.from(head, "utf8"),
+      Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength),
+      Buffer.from(tail, "utf8"),
+    ]);
 
     const result = await this.requestJson<{
       item: { path: string; root: string; size: number; modified: number };
