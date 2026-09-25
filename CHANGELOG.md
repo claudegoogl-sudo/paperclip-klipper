@@ -5,6 +5,21 @@ plugin follows semver against the host plugin API (PLA-526 keeps
 `package.json.version` and the manifest version in lockstep via the build
 `define`).
 
+## 0.2.9 — 2026-09-25
+
+### Fixed
+- **Status stream self-heals after a host drop.** When the host drops our
+  status-stream `open` (`streams.dropped` for our channel), the worker now
+  clears its local pin mirror so the next credentialed dispatch re-opens the
+  channel. Before, same-company dedupe kept the stream silent until a
+  transport restart.
+
+### Tests
+- New spec for the drop→re-open path (red on 0.2.8, green now).
+- New spec for the in-place re-point path (same connection, other company):
+  single transport, re-pointed channel, zero extra host calls.
+- Refreshed the stale SDK generation note in the test harness docblock.
+
 ## 0.2.8 — 2026-09-25
 
 ### Fixed
