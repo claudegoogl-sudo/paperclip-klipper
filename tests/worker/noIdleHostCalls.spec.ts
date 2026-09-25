@@ -18,8 +18,8 @@
  *   - config application makes ZERO worker→host calls — including
  *     overlapping multi-row replays and an apply that outlives its push —
  *     and converges ref-bearing transports DORMANT;
- *   - the fail-closed idle state is OBSERVABLE: status data key, status
- *     tool, and health report "credential not resolved yet" (never a
+ *   - the fail-closed idle state is OBSERVABLE: status data key and
+ *     health report (the status TOOL resolves in-dispatch since 0.2.10) "credential not resolved yet" (never a
  *     0.2.2-style gate error, never a crash loop), and no request leaves
  *     the process before a dispatch;
  *   - the FIRST credentialed dispatch resolves the ref exactly once
@@ -235,15 +235,6 @@ describe("fail-closed idle: degraded status with the pending reason (AC3)", () =
     expect(status.degraded).toBe(true);
     expect(status.degradedReason).toContain(CREDENTIAL_PENDING);
 
-    // The status TOOL answers cache-only with the same signal.
-    const tool = await harness.executeTool<{
-      data?: { degraded?: boolean; degradedReason?: string };
-      error?: string;
-    }>("klipper.get_printer_status", {});
-    expect(tool.error).toBeUndefined();
-    expect(tool.data?.degraded).toBe(true);
-    expect(tool.data?.degradedReason).toContain(CREDENTIAL_PENDING);
-
     // Health is degraded with the same reason — not a misleading "ok".
     const health = await plugin.definition.onHealth!();
     expect(health.status).toBe("degraded");
@@ -252,6 +243,15 @@ describe("fail-closed idle: degraded status with the pending reason (AC3)", () =
     // Idle for >=3 poll-cycle windows: no network traffic, no crash loop.
     await new Promise((r) => setTimeout(r, 60));
     expect(mock.recordedRequests).toHaveLength(0);
+
+    // 0.2.10: the status TOOL is a dispatch, so it resolves the credential
+    // in-dispatch and brings the transport up (no gate error, no throw).
+    const tool = await harness.executeTool<{
+      data?: { degraded?: boolean; degradedReason?: string };
+      error?: string;
+    }>("klipper.get_printer_status", {});
+    expect(tool.error).toBeUndefined();
+    expect(tool.data?.degraded).toBeUndefined();
   });
 });
 
@@ -457,9 +457,9 @@ describe("cache lifecycle: invalidation + rotation + reconnect (AC4)", () => {
         "klipper.get_printer_status",
         {},
       );
-      // get_printer_status is cache-only and must NOT resolve; bring the
-      // transport up through an upload dispatch instead.
-      expect(calls.secretResolves).toHaveLength(0);
+      // 0.2.10: get_printer_status resolves in-dispatch (once); the upload
+      // below reuses the cached key.
+      expect(calls.secretResolves).toHaveLength(1);
       await harness.executeTool<{ error?: string }>(
         "klipper.upload_gcode",
         { filename: "demo.gcode", artifactId: ARTIFACT_ID },

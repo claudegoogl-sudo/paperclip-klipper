@@ -5,6 +5,29 @@ plugin follows semver against the host plugin API (PLA-526 keeps
 `package.json.version` and the manifest version in lockstep via the build
 `define`).
 
+## 0.2.10 — 2026-09-25
+
+### Fixed
+- **`klipper.get_printer_status` reports the calling company's printer.** The
+  worker is shared by every company. The status tool used to return whatever
+  client the worker held — after a fresh boot that is another company's idle
+  boot client (`connection.state: "idle"`, no FlashForge `machineState`). It
+  now resolves the dispatching company's transport from the live config inside
+  the dispatch, like `upload_gcode` and `start_print`. It stays read-only.
+- **Tools work on a worker that has no applied config.** After a bare worker
+  restart with no config replay, all three tools returned
+  `prerequisite_missing` before the in-dispatch resolution could build the
+  client. The client null-guard now runs after one shared resolution helper;
+  `prerequisite_missing` is returned only when the LIVE config is missing or
+  invalid.
+- A status dispatch whose credential resolution fails returns a soft
+  `degraded: true` result with the (secret-free) reason. It never returns the
+  snapshot of a client that belongs to another company.
+
+### Unchanged
+- Manifest capabilities (5) and tools (3). `auto_upload_artifacts` and
+  `allow_agent_initiated_print` gates run in the same order as before.
+
 ## 0.2.9 — 2026-09-25
 
 ### Fixed

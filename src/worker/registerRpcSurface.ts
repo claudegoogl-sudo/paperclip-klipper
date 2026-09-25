@@ -33,7 +33,10 @@ import {
   FlashForgeCredentialPendingError,
   FlashForgeOutboundScopeError,
 } from "./transports/FlashForgeClient.js";
-import { validateFlashForgeConfig } from "./transports/validateTransportConfig.js";
+import {
+  selectTransport,
+  validateFlashForgeConfig,
+} from "./transports/validateTransportConfig.js";
 import { validateMoonrakerBaseUrl } from "./validateMoonrakerBaseUrl.js";
 import type { PrinterTransport } from "./transports/PrinterTransport.js";
 import type { SecretRef } from "./secretRef.js";
@@ -295,6 +298,58 @@ async function readLiveConfig(
     });
     return {};
   }
+}
+
+
+/**
+ * One shared in-dispatch transport resolution for every tool handler.
+ *
+ * Order matters: resolve the dispatching company's transport from the LIVE
+ * config FIRST (`ensureCredential` builds/converges the client even when the
+ * worker holds no client at all, e.g. after a bare worker restart without a
+ * config replay), and only THEN read the current client. `prerequisite_missing`
+ * is decided from the live config, never from the boot-time client slot.
+ */
+type DispatchTransport =
+  | { kind: "ready"; client: PrinterTransport }
+  | { kind: "refused"; reason: string };
+
+/**
+ * `prerequisite_missing` message when the LIVE dispatch config cannot build
+ * a transport (missing or invalid fields), else `null`. Pure (no host call),
+ * so it runs before the opt-in gates exactly where the old client null-guard
+ * did. Consulted ONLY when the worker holds no client: a held client keeps
+ * the existing gate → validate → resolve order, and `ensureCredential`
+ * refuses a bad live config there.
+ */
+function liveConfigMissingMessage(liveConfig: Partial<KlipperConfig>): string | null {
+  const selection = selectTransport(liveConfig.transport);
+  if (!selection.ok) return PREREQ_MISSING_MESSAGE;
+  if (selection.kind === "flashforge") {
+    return validateFlashForgeConfig(liveConfig).ok ? null : FLASHFORGE_PREREQ_MISSING_MESSAGE;
+  }
+  return typeof liveConfig.moonrakerBaseUrl === "string" &&
+    liveConfig.moonrakerBaseUrl !== "" &&
+    validateMoonrakerBaseUrl(liveConfig.moonrakerBaseUrl, liveConfig.moonrakerAllowedHosts).ok
+    ? null
+    : PREREQ_MISSING_MESSAGE;
+}
+
+async function resolveDispatchTransport(
+  options: RpcSurfaceOptions,
+  liveConfig: Partial<KlipperConfig>,
+  method: string,
+  dispatchCompanyId: string,
+): Promise<DispatchTransport> {
+  if (options.ensureCredential) {
+    const cred = await options.ensureCredential(liveConfig, method, dispatchCompanyId);
+    if (!cred.ok) return { kind: "refused", reason: cred.reason };
+  }
+  const client = options.getClient();
+  if (!client) {
+    return { kind: "refused", reason: "the printer transport is not available for this dispatch" };
+  }
+  return { kind: "ready", client };
 }
 
 /**
@@ -786,15 +841,37 @@ export function registerRpcSurface(
         "the FlashForge LAN-only HTTP API.",
       parametersSchema: { type: "object", properties: {}, additionalProperties: false },
     },
-    async (): Promise<ToolResult> => {
-      const client = options.getClient();
-      if (!client) return prerequisiteMissingToolResult(prereqMessage);
+    async (_params, runCtx): Promise<ToolResult> => {
+      // Resolve the DISPATCHING company's transport (the worker is shared
+      // by every company; the held client may be another company's idle
+      // boot client, or absent after a bare restart). Read-only: the
+      // resolution only starts the status/poll loop, never an upload,
+      // print or delete call.
+      const liveConfig = await readLiveConfig(ctx, "get_printer_status");
+      const missing = options.getClient() === null ? liveConfigMissingMessage(liveConfig) : null;
+      if (missing !== null) return prerequisiteMissingToolResult(missing);
+      const t = await resolveDispatchTransport(
+        options,
+        liveConfig,
+        "get_printer_status",
+        runCtx.companyId,
+      );
+      if (t.kind === "refused") {
+        // Soft failure: no throw. The held client is NOT this company's
+        // verified transport, so its snapshot is never returned here
+        // (that would expose another company's printer state).
+        return {
+          data: {
+            objects: null,
+            updatedAt: null,
+            connection: { state: "idle", attempts: 0 },
+            degraded: true,
+            degradedReason: t.reason,
+          },
+        };
+      }
       try {
-        // Cache-only by design (no resolve, no network): status consumes
-        // what the transport already holds and reports the degraded
-        // reason while the credential is unresolved.
-        const snapshot = client.getStatusSnapshot();
-        return { data: withDegradedReason(snapshot) };
+        return { data: withDegradedReason(t.client.getStatusSnapshot()) };
       } catch (err) {
         return toolError(err, "get_printer_status");
       }
@@ -845,11 +922,13 @@ export function registerRpcSurface(
       },
     },
     async (params, runCtx): Promise<ToolResult> => {
-      const client = options.getClient();
-      if (!client) return prerequisiteMissingToolResult(prereqMessage);
       // Re-read config live on every dispatch — never gate off the value
-      // captured at setup(). Fails closed if the read errors.
+      // captured at setup(). Fails closed if the read errors. The client
+      // null-guard runs AFTER the in-dispatch resolution below (a bare
+      // restart leaves no client, but the live config can build one).
       const liveConfig = await readLiveConfig(ctx, "upload_gcode");
+      const missing = options.getClient() === null ? liveConfigMissingMessage(liveConfig) : null;
+      if (missing !== null) return prerequisiteMissingToolResult(missing);
       if (liveConfig.auto_upload_artifacts !== true) {
         return {
           error:
@@ -872,20 +951,16 @@ export function registerRpcSurface(
         // attribution authorizes `secrets.resolve`). The resolution also
         // STARTS the dormant transport, so the first upload brings the
         // printer online.
-        let active = client;
-        if (options.ensureCredential) {
-          const cred = await options.ensureCredential(
-            liveConfig,
-            "upload_gcode",
-            runCtx.companyId,
-          );
-          if (!cred.ok) {
-            return { error: `upload_gcode: refused — ${cred.reason}` };
-          }
-          // The resolution may have converged (replaced) the client object;
-          // the actual upload must use the CURRENT one.
-          active = options.getClient() ?? client;
-        }
+        const t = await resolveDispatchTransport(
+          options,
+          liveConfig,
+          "upload_gcode",
+          runCtx.companyId,
+        );
+        if (t.kind === "refused") return { error: `upload_gcode: refused — ${t.reason}` };
+        // The resolution may have converged (replaced) the client object;
+        // the actual upload uses the CURRENT one.
+        const active = t.client;
         // The host resolves the attachment under the dispatching agent's
         // identity; the worker never receives inline bytes on this path.
         // `artifacts` is typed optional on the current SDK generation: hosts
@@ -935,11 +1010,13 @@ export function registerRpcSurface(
       },
     },
     async (params, runCtx): Promise<ToolResult> => {
-      const client = options.getClient();
-      if (!client) return prerequisiteMissingToolResult(prereqMessage);
       // Re-read config live on every dispatch — never gate off the value
-      // captured at setup(). Fails closed if the read errors.
+      // captured at setup(). Fails closed if the read errors. The client
+      // null-guard runs AFTER the in-dispatch resolution below (a bare
+      // restart leaves no client, but the live config can build one).
       const liveConfig = await readLiveConfig(ctx, "start_print");
+      const missing = options.getClient() === null ? liveConfigMissingMessage(liveConfig) : null;
+      if (missing !== null) return prerequisiteMissingToolResult(missing);
       if (liveConfig.allow_agent_initiated_print !== true) {
         return {
           error:
@@ -965,18 +1042,14 @@ export function registerRpcSurface(
         // Lazy credential resolution — INSIDE the dispatch (see
         // upload_gcode). Gate + validation run first; a refused dispatch
         // never spends a resolve.
-        let active = client;
-        if (options.ensureCredential) {
-          const cred = await options.ensureCredential(
-            liveConfig,
-            "start_print",
-            runCtx.companyId,
-          );
-          if (!cred.ok) {
-            return { error: `start_print: refused — ${cred.reason}` };
-          }
-          active = options.getClient() ?? client;
-        }
+        const t = await resolveDispatchTransport(
+          options,
+          liveConfig,
+          "start_print",
+          runCtx.companyId,
+        );
+        if (t.kind === "refused") return { error: `start_print: refused — ${t.reason}` };
+        const active = t.client;
         const result = await active.startPrint(filename);
         return { data: { ok: true, result } };
       } catch (err) {
