@@ -5,6 +5,18 @@ plugin follows semver against the host plugin API (PLA-526 keeps
 `package.json.version` and the manifest version in lockstep via the build
 `define`).
 
+## 0.2.8 — 2026-09-25
+
+### Fixed
+- **`klipper.upload_gcode` now uploads non-ASCII G-code byte-exact** on both
+  the FlashForge and Moonraker transports. The multipart body was built as a
+  latin1 string; the SDK sends string bodies as UTF-8, so every byte >= 0x80
+  (for example an em-dash or degree sign in a slicer comment) became two
+  bytes. The FlashForge file part then no longer matched the `fileSize`
+  header and the printer answered "Send file error". The body is now a
+  Buffer, which the SDK sends as base64 and the host decodes byte-exact.
+  No new capabilities; no host change.
+
 ## 0.2.7 — 2026-09-24
 
 ### Added

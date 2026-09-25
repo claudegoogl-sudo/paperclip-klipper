@@ -12,7 +12,8 @@
  * `PluginHttpClient` that records every `fetch(url, init)` call and asserts:
  *   1. Captured `init.headers` (case-insensitive) carries a Content-Type
  *      matching `/^multipart\/form-data; boundary=.+/`.
- *   2. Captured `init.body` is a string whose opening delimiter contains the
+ *   2. Captured `init.body` is bytes (never a string: the SDK sends strings
+ *      as UTF-8, which corrupts bytes >= 0x80) whose opening delimiter contains the
  *      SAME boundary declared in the Content-Type header, proving header and
  *      body agree.
  *   3. The body contains the `filename="…"` Content-Disposition expected by
@@ -111,11 +112,11 @@ describe("MoonrakerClient.uploadGcode — multipart Content-Type", () => {
     const boundary = boundaryMatch![1]!;
     expect(boundary.length).toBeGreaterThan(0);
 
-    // (2) Captured body MUST be a string whose first bytes carry the same
+    // (2) Captured body MUST be bytes (not a string) whose first bytes carry the same
     // boundary as the header (header + body agree). RFC 7578 prepends "--"
     // to the boundary token at part delimiters.
-    expect(typeof call.init?.body).toBe("string");
-    const body = call.init!.body as string;
+    expect(call.init?.body instanceof Uint8Array).toBe(true);
+    const body = Buffer.from(call.init!.body as Uint8Array).toString("latin1");
     expect(body.startsWith(`--${boundary}\r\n`)).toBe(true);
     expect(body).toContain(`--${boundary}--\r\n`); // closing delimiter present.
 
