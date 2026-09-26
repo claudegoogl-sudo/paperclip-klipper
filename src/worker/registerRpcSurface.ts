@@ -123,6 +123,14 @@ export interface RpcSurfaceOptions {
    */
   getClient: () => PrinterTransport | null;
   /**
+   * Company that owns the held client (multi-company tenancy gate). The
+   * data/action surface serves the client only to this company; `null`
+   * (or absent) = no company scope, served to every caller.
+   */
+  getClientOwnerCompanyId?: () => string | null;
+  /** Company whose applied config owns `config` + `camera` (same rule). */
+  getConfigOwnerCompanyId?: () => string | null;
+  /**
    * Why the transport is not running yet ("credential not resolved
    * yet"), or `null`. Merged into the status surfaces so the fail-closed
    * idle state is observable instead of a misleading gate error.
@@ -522,11 +530,49 @@ export function registerRpcSurface(
   const maxInflatedGcodeBytes =
     options.maxInflatedGcodeBytes ?? MAX_INFLATED_GCODE_BYTES;
 
+  // ── multi-company tenancy gate ─────────────────────────────────────────
+  // The worker is shared by every company that configured the plugin
+  // (multiCompanyConfig), but it holds ONE client + camera at a time. The
+  // non-dispatch surfaces below must never serve another company's printer:
+  // the invoking company comes from the host-authorized bridge scope (data:
+  // `params.companyId`, injected by the SDK over caller params; actions:
+  // `actionCtx.companyId`). A caller whose scope does not match the owner —
+  // including an unscoped caller while an owner is set — gets the idle
+  // shape (data) or `prerequisite_missing` (actions). Fail closed.
+  const dataScope = (params: Record<string, unknown> | undefined): string | null =>
+    typeof params?.companyId === "string" && params.companyId.length > 0
+      ? params.companyId
+      : null;
+  const actionScope = (
+    actionCtx: PluginPerformActionContext | undefined,
+  ): string | null => actionCtx?.companyId ?? actionCtx?.actor?.companyId ?? null;
+  const ownerAllows = (owner: string | null, scope: string | null): boolean =>
+    owner === null || scope === owner;
+  const clientFor = (scope: string | null): PrinterTransport | null => {
+    const owner = options.getClientOwnerCompanyId?.() ?? null;
+    if (!ownerAllows(owner, scope)) {
+      ctx.logger.warn("klipper.tenancy.client_denied", {
+        pluginId: "platform.klipper",
+        scoped: scope !== null,
+      });
+      return null;
+    }
+    return options.getClient();
+  };
+  const configAllows = (scope: string | null): boolean =>
+    ownerAllows(options.getConfigOwnerCompanyId?.() ?? null, scope);
+  const cameraFor = (scope: string | null): CameraFeed | null =>
+    camera && configAllows(scope) ? camera : null;
+
   // ── ctx.data ────────────────────────────────────────────────────────────
   // Always register the data keys (the page slot expects them to exist even
   // when the worker came up without config). When the client is absent we
   // return safe defaults so the UI can render the needs-config placeholder.
-  ctx.data.register("config", async () => {
+  ctx.data.register("config", async (params: Record<string, unknown>) => {
+    if (!configAllows(dataScope(params))) {
+      // Another company's config: report unconfigured, leak nothing.
+      return { configured: false, moonrakerBaseUrl: null, cameraConfigured: false };
+    }
     // Moonraker / unset transport: exactly the legacy two-field shape.
     // FlashForge: same base fields plus the transport identity so the UI
     // can name the configured printer host.
@@ -567,8 +613,8 @@ export function registerRpcSurface(
   // refetch. This surface NEVER resolves credentials (it runs outside
   // dispatches): before the first credentialed dispatch it reports the
   // degraded reason instead.
-  ctx.data.register("status", async () => {
-    const client = options.getClient();
+  ctx.data.register("status", async (params: Record<string, unknown>) => {
+    const client = clientFor(dataScope(params));
     if (!client) {
       return {
         connection: { state: "idle", attempts: 0, configured: false },
@@ -578,21 +624,21 @@ export function registerRpcSurface(
     return withDegradedReason(client.getStatusSnapshot());
   });
 
-  ctx.data.register("connection", async () => {
-    const client = options.getClient();
+  ctx.data.register("connection", async (params: Record<string, unknown>) => {
+    const client = clientFor(dataScope(params));
     if (!client) return { state: "idle", attempts: 0, configured: false };
     return client.getConnectionState();
   });
 
   ctx.data.register("files", async (params: Record<string, unknown>) => {
-    const client = options.getClient();
+    const client = clientFor(dataScope(params));
     if (!client) return [];
     const root = typeof params.root === "string" ? params.root : "gcodes";
     return client.listFiles(root);
   });
 
   ctx.data.register("file_metadata", async (params: Record<string, unknown>) => {
-    const client = options.getClient();
+    const client = clientFor(dataScope(params));
     if (!client) throw prerequisiteMissingError(prereqMessage);
     const filename = typeof params.filename === "string" ? params.filename : "";
     if (!filename) throw new Error("file_metadata requires `filename`");
@@ -607,8 +653,8 @@ export function registerRpcSurface(
   // NOTE: actions run OUTSIDE dispatches — they consume the client-held
   // credential only and NEVER resolve (the client throws its
   // "credential not resolved yet" error while the transport is dormant).
-  ctx.actions.register("refresh", async () => {
-    const client = options.getClient();
+  ctx.actions.register("refresh", async (_params, actionCtx) => {
+    const client = clientFor(actionScope(actionCtx));
     if (!client) throw prerequisiteMissingError(prereqMessage);
     const info = await client.getPrinterInfo();
     return { ok: true, info, snapshot: client.getStatusSnapshot() };
@@ -622,7 +668,7 @@ export function registerRpcSurface(
         requires: true,
         what: "pausing a print",
       });
-      const client = options.getClient();
+      const client = clientFor(actionScope(actionCtx));
       if (!client) throw prerequisiteMissingError(prereqMessage);
       const result = await client.pausePrint();
       return { ok: true, result };
@@ -637,7 +683,7 @@ export function registerRpcSurface(
         requires: true,
         what: "resuming a print",
       });
-      const client = options.getClient();
+      const client = clientFor(actionScope(actionCtx));
       if (!client) throw prerequisiteMissingError(prereqMessage);
       const result = await client.resumePrint();
       return { ok: true, result };
@@ -652,7 +698,7 @@ export function registerRpcSurface(
         requires: true,
         what: "cancelling a print",
       });
-      const client = options.getClient();
+      const client = clientFor(actionScope(actionCtx));
       if (!client) throw prerequisiteMissingError(prereqMessage);
       const result = await client.cancelPrint();
       return { ok: true, result };
@@ -671,7 +717,7 @@ export function registerRpcSurface(
         requires: true,
         what: "starting a print",
       });
-      const client = options.getClient();
+      const client = clientFor(actionScope(actionCtx));
       if (!client) throw prerequisiteMissingError(prereqMessage);
       const filename = typeof params.filename === "string" ? params.filename : "";
       if (!filename) throw new Error("start_print requires `filename`");
@@ -691,7 +737,7 @@ export function registerRpcSurface(
         requires: true,
         what: "deleting printer files",
       });
-      const client = options.getClient();
+      const client = clientFor(actionScope(actionCtx));
       if (!client) throw prerequisiteMissingError(prereqMessage);
       const path = typeof params.path === "string" ? params.path : "";
       if (!path) throw new Error("delete_file requires `path`");
@@ -701,8 +747,8 @@ export function registerRpcSurface(
     },
   );
 
-  ctx.actions.register("retry_connection", async () => {
-    const client = options.getClient();
+  ctx.actions.register("retry_connection", async (_params, actionCtx) => {
+    const client = clientFor(actionScope(actionCtx));
     if (!client) throw prerequisiteMissingError(prereqMessage);
     await client.retryConnection();
     return { ok: true, connection: client.getConnectionState() };
@@ -724,6 +770,7 @@ export function registerRpcSurface(
     "camera_open",
     async (_params, actionCtx) => {
       assertBoardActor(actionCtx, "camera_open");
+      const camera = cameraFor(actionScope(actionCtx));
       if (!camera) throw cameraPrereqError();
       const connection = camera.open();
       return { ok: true, connection };
@@ -734,6 +781,7 @@ export function registerRpcSurface(
     "camera_next",
     async (_params, actionCtx) => {
       assertBoardActor(actionCtx, "camera_next");
+      const camera = cameraFor(actionScope(actionCtx));
       if (!camera) throw cameraPrereqError();
       // Every poll refreshes the idle clock — this IS the viewer heartbeat.
       camera.touch();
@@ -755,9 +803,10 @@ export function registerRpcSurface(
     },
   );
 
-  ctx.actions.register("camera_close", async () => {
+  ctx.actions.register("camera_close", async (_params, actionCtx) => {
     // Closing is safe for any actor — it only releases the printer's
     // camera slot; no frames are served by this action.
+    const camera = cameraFor(actionScope(actionCtx));
     if (!camera) return { ok: true, connection: null };
     camera.close("page_closed");
     return { ok: true };
@@ -767,6 +816,7 @@ export function registerRpcSurface(
     "camera_retry",
     async (_params, actionCtx) => {
       assertBoardActor(actionCtx, "camera_retry");
+      const camera = cameraFor(actionScope(actionCtx));
       if (!camera) throw cameraPrereqError();
       const connection = camera.retry();
       return { ok: true, connection };
@@ -789,7 +839,7 @@ export function registerRpcSurface(
       // Actions run OUTSIDE dispatches: they use the current client and
       // NEVER resolve — a dormant transport surfaces its own
       // "credential not resolved yet" error to the page.
-      const client = options.getClient();
+      const client = clientFor(actionScope(actionCtx));
       if (!client) throw prerequisiteMissingError(prereqMessage);
       const filename = typeof params.filename === "string" ? params.filename : "";
       const gcodeBase64 = typeof params.gcodeBase64 === "string" ? params.gcodeBase64 : "";

@@ -179,7 +179,21 @@ export interface KlipperWorker {
     rawConfig: Partial<KlipperConfig>,
     source: KlipperConfigSource,
     autoStart?: boolean,
+    companyId?: string | null,
   ): Promise<void>;
+  /**
+   * Company that owns the printer client the worker currently holds: the
+   * company whose config built it (apply) or whose dispatch last
+   * credentialed / re-pointed it. `null` = no company scope (instance-level
+   * config, never dispatched). The data/action surface serves the client
+   * ONLY to this company (multi-company tenancy gate).
+   */
+  getClientOwnerCompanyId(): string | null;
+  /**
+   * Company whose config was applied last. Owns the display config and
+   * the camera feed built from it. `null` = no company scope.
+   */
+  getConfigOwnerCompanyId(): string | null;
 }
 
 /**
@@ -400,6 +414,11 @@ export async function createKlipperWorker(
    * never-started client is KEPT (with its credential cleared) so the
    * per-company boot replay burst converges without churning clients.
    */
+  // Tenancy owners for the non-dispatch data/action surface (see
+  // KlipperWorker.getClientOwnerCompanyId).
+  let clientOwnerCompanyId: string | null = null;
+  let configOwnerCompanyId: string | null = null;
+
   const invalidateTransportForApplication = (): void => {
     const client = handle.client;
     if (!client) return;
@@ -425,7 +444,9 @@ export async function createKlipperWorker(
      */
     camera: null,
     cameraFingerprint: null,
-    async applyConfig(nextConfig, source, autoStart = true) {
+    getClientOwnerCompanyId: () => clientOwnerCompanyId,
+    getConfigOwnerCompanyId: () => configOwnerCompanyId,
+    async applyConfig(nextConfig, source, autoStart = true, companyId = null) {
       // Defensive: a malformed replay must not crash the worker; treat it
       // like an absent config and degrade permissively.
       const config: Partial<KlipperConfig> =
@@ -439,6 +460,10 @@ export async function createKlipperWorker(
       // picked up at the next dispatch. Until that dispatch the transport
       // runs dormant/degraded (fail-closed idle).
       credentialCache = null;
+      // Multi-company tenancy: the held client and camera now describe THIS
+      // company's config (until a dispatch re-points them).
+      clientOwnerCompanyId = companyId ?? null;
+      configOwnerCompanyId = companyId ?? null;
 
       // ── Camera feed (independent of transport selection) ─────────────
       // Validated like the transport config (http(s), no userinfo, host
@@ -884,6 +909,7 @@ export async function createKlipperWorker(
         // feeds every later emit, and the host re-pins on a verified open).
         openStatusChannel(dispatchCompanyId);
       }
+      clientOwnerCompanyId = dispatchCompanyId || null;
       return { ok: true };
     }
 
@@ -935,6 +961,7 @@ export async function createKlipperWorker(
         // reuse the held client; the status stream follows the dispatch).
         openStatusChannel(dispatchCompanyId);
       }
+      clientOwnerCompanyId = dispatchCompanyId || null;
       return { ok: true };
     }
 
@@ -1070,6 +1097,7 @@ export async function createKlipperWorker(
       transport: selection.kind,
       method,
     });
+    clientOwnerCompanyId = dispatchCompanyId || null;
     return { ok: true };
   }
 
@@ -1083,6 +1111,8 @@ export async function createKlipperWorker(
     return {
       config,
       getClient: () => handle.client,
+      getClientOwnerCompanyId: () => clientOwnerCompanyId,
+      getConfigOwnerCompanyId: () => configOwnerCompanyId,
       getDegradedReason: () => credentialPendingReason,
       ensureCredential,
       camera: handle.camera,
@@ -1122,6 +1152,17 @@ let activeWorker: KlipperWorker | null = null;
 let activeCtx: PluginContext | null = null;
 
 const plugin = definePlugin({
+  // One worker serves every company. Tools, data and actions read the
+  // dispatching company's config via `ctx.config.get()` inside the dispatch
+  // and rebuild the transport when its connection identity differs (see
+  // `ensureCredential`), so the worker-global applied config is only the
+  // boot/idle transport, never the authority for a dispatch. Declaring this
+  // lets the host replay every configured company's row; without it the
+  // SDK rejects each company whose config differs from the first
+  // (CROSS_TENANT_CONFIG, -32006) and the host logs a failed delivery on
+  // every activation.
+  multiCompanyConfig: true,
+
   async setup(ctx) {
     // Skip auto-start under Vitest so the scaffold tests don't try
     // to open a real WebSocket against a fake hostname. Tests that exercise
@@ -1136,7 +1177,10 @@ const plugin = definePlugin({
   // every operator config save uses the same path. Without it the host would
   // restart the worker to apply config — re-running setup, hitting the same
   // service-scope denial, and never converging.
-  async onConfigChanged(newConfig: Record<string, unknown>) {
+  async onConfigChanged(
+    newConfig: Record<string, unknown>,
+    context?: { companyId?: string | null },
+  ) {
     const worker = activeWorker;
     const ctx = activeCtx;
     if (!worker || !ctx) return;
@@ -1146,6 +1190,7 @@ const plugin = definePlugin({
         (newConfig ?? {}) as Partial<KlipperConfig>,
         "configChanged",
         process.env.VITEST !== "true",
+        context?.companyId ?? null,
       );
     } catch (err) {
       // A failed apply must never error the RPC back to the host — the

@@ -188,7 +188,7 @@ describe("worker — flashforge transport happy paths (mock printer)", () => {
         updatedAt: string | null;
         degraded?: boolean;
         degradedReason?: string;
-      }>("status");
+      }>("status", { companyId: "company-test" });
       expect(status.connection.state).toBe("connected");
       expect(status.degraded).toBeUndefined();
       expect(status.updatedAt).toBeTruthy();
@@ -196,6 +196,81 @@ describe("worker — flashforge transport happy paths (mock printer)", () => {
       expect(status.objects.flashforge).toMatchObject({ model: "Creator 5" });
     } finally {
       worker.client!.stop();
+    }
+  });
+
+  it("tenancy: another company's board/agent callers never reach the held printer or config", async () => {
+    const { harness, worker } = await makeWorker({ auto_upload_artifacts: true });
+    const OTHER = "company-other";
+    // Company "company-test" credentials the transport in its own dispatch.
+    const res = await harness.executeTool<{ error?: string }>(
+      "klipper.upload_gcode",
+      { filename: "bracket.gcode", artifactId: ARTIFACT_ID },
+      artifactCtx(),
+    );
+    expect(res.error).toBeUndefined();
+    await waitFor(() => worker.client!.getConnectionState().state === "connected");
+    try {
+      // Owner still gets live data.
+      const own = await harness.getData<{ connection: { state: string } }>("status", {
+        companyId: "company-test",
+      });
+      expect(own.connection.state).toBe("connected");
+      // Another company (and an unscoped caller) gets the idle shape only.
+      for (const scope of [{ companyId: OTHER }, {}]) {
+        const other = await harness.getData<{
+          connection: { state: string };
+          objects: Record<string, unknown>;
+        }>("status", scope);
+        expect(other.connection.state).toBe("idle");
+        expect(other.objects?.flashforge).toBeUndefined();
+        const files = await harness.getData<unknown>("files", scope);
+        expect(JSON.stringify(files)).not.toContain("bracket.gcode");
+      }
+      // Mutating actions from another company fail closed.
+      for (const [key, params] of [
+        ["start_print", { filename: "bracket.gcode" }],
+        ["delete_file", { path: "bracket.gcode" }],
+        ["pause_print", {}],
+        ["refresh", {}],
+      ] as const) {
+        await expect(
+          harness.performAction(key, { ...params }, {
+            companyId: OTHER,
+            actor: { type: "user", userId: "u-other", companyId: OTHER },
+          }),
+        ).rejects.toThrow();
+      }
+      // Config + camera follow the APPLYING company.
+      await worker.applyConfig(
+        ffConfig(mock.baseUrl(), {
+          auto_upload_artifacts: true,
+          flashforgeCameraBaseUrl: `http://${new URL(mock.baseUrl()).hostname}:8080`,
+        }) as never,
+        "configChanged",
+        false,
+        "company-test",
+      );
+      const cfgOther = await harness.getData<{ configured: boolean; cameraConfigured: boolean }>(
+        "config",
+        { companyId: OTHER },
+      );
+      expect(cfgOther).toEqual({ configured: false, moonrakerBaseUrl: null, cameraConfigured: false });
+      const cfgOwn = await harness.getData<{ configured: boolean }>("config", {
+        companyId: "company-test",
+      });
+      expect(cfgOwn.configured).toBe(true);
+      for (const key of ["camera_open", "camera_next", "camera_retry"]) {
+        await expect(
+          harness.performAction(key, {}, {
+            companyId: OTHER,
+            actor: { type: "user", userId: "u-other", companyId: OTHER },
+          }),
+        ).rejects.toThrow(/Camera not configured/);
+      }
+    } finally {
+      worker.client?.stop();
+      worker.camera?.dispose();
     }
   });
 
