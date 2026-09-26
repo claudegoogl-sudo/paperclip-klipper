@@ -27,6 +27,7 @@ Every PR states the provider, the exact model id, and relevant capability detail
 - All CI checks green before merge. Red CI on a public repo is a P0 — fix or close it, never defer it.
 - One PR = one logical change. No unrelated cleanups bundled in.
 - When the plugin version changes, bump `package.json` **and** the version literal in `src/manifest.ts` in the same PR. The host registers by `manifest.version`; drift between the two ships a mislabelled plugin.
+- `dist.sha256` must match a clean build of the PR head. Re-run `npm run build && npm run write:dist-hashes` after your **last** source commit (including review fix-ups) and commit the result. CI checks this with `sha256sum -c dist.sha256`. No version bump is needed for a hash-only refresh.
 - The Verification section carries real evidence — command output, an install probe, a screenshot — not an assertion that it works.
 
 ## Not applicable here
