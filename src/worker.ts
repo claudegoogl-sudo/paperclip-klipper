@@ -277,27 +277,43 @@ export async function createKlipperWorker(
   let transportStarted = false;
 
   // Stream emissions shared by both transports (identical callback shape).
-  const transportStreamCallbacks = {
-    onStatus: (snapshot: MoonrakerStatusSnapshot) => {
-      try {
-        ctx.streams.emit(STREAM_CHANNEL, { type: "status", snapshot });
-      } catch (err) {
-        ctx.logger.debug("klipper.stream.emit_failed", {
-          channel: STREAM_CHANNEL,
-          error: String(err instanceof Error ? err.message : err),
-        });
-      }
-    },
-    onConnectionState: (state: ConnectionStateSnapshot) => {
-      try {
-        ctx.streams.emit(STREAM_CHANNEL, { type: "connection", state });
-      } catch (err) {
-        ctx.logger.debug("klipper.stream.emit_failed", {
-          channel: STREAM_CHANNEL,
-          error: String(err instanceof Error ? err.message : err),
-        });
-      }
-    },
+  //
+  // Emits are gated on the status-channel mirror: a status push is only
+  // sent while this worker believes the host holds a pin for the channel
+  // (opened inside a credentialed dispatch). A transport being stopped
+  // during config application (boot replay burst, operator save) pushes a
+  // final `idle` connection state synchronously from `stop()`; that emit
+  // has no dispatch claim, and the host drops it fail-closed
+  // (`pin_mismatch`). `stopClient` therefore closes the channel BEFORE
+  // stopping the client, and each client's callbacks carry the transport
+  // generation they were created under, so a stopped/replaced client can
+  // never emit again — not even from a late async poll.
+  let transportGeneration = 0;
+  const emitStatus = (generation: number, payload: unknown): void => {
+    if (generation !== transportGeneration || statusChannelCompanyId === null) {
+      ctx.logger.debug("klipper.stream.emit_suppressed", {
+        channel: STREAM_CHANNEL,
+        reason: generation !== transportGeneration ? "stale_transport" : "channel_closed",
+      });
+      return;
+    }
+    try {
+      ctx.streams.emit(STREAM_CHANNEL, payload);
+    } catch (err) {
+      ctx.logger.debug("klipper.stream.emit_failed", {
+        channel: STREAM_CHANNEL,
+        error: String(err instanceof Error ? err.message : err),
+      });
+    }
+  };
+  const makeTransportStreamCallbacks = () => {
+    const generation = transportGeneration;
+    return {
+      onStatus: (snapshot: MoonrakerStatusSnapshot) =>
+        emitStatus(generation, { type: "status", snapshot }),
+      onConnectionState: (state: ConnectionStateSnapshot) =>
+        emitStatus(generation, { type: "connection", state }),
+    };
   };
 
   // ── Status stream channel lifecycle ────────────────────────────────────
@@ -403,8 +419,11 @@ export async function createKlipperWorker(
    */
   const stopClient = (client: { stop(): void } | null): void => {
     if (!client) return;
-    client.stop();
+    // Retire the client's callbacks and close the channel FIRST: `stop()`
+    // pushes a synchronous `idle` state that must not reach the host.
+    transportGeneration += 1;
     closeStatusChannel();
+    client.stop();
   };
 
   /**
@@ -653,7 +672,7 @@ export async function createKlipperWorker(
           apiKey: null,
           http: ctx.http,
           logger: ctx.logger,
-          ...transportStreamCallbacks,
+          ...makeTransportStreamCallbacks(),
           ...clientOverrides,
         });
         handle.client = client;
@@ -695,7 +714,7 @@ export async function createKlipperWorker(
           apiKey: null,
           http: ctx.http,
           logger: ctx.logger,
-          ...transportStreamCallbacks,
+          ...makeTransportStreamCallbacks(),
           ...clientOverrides,
         });
       }
@@ -755,7 +774,7 @@ export async function createKlipperWorker(
           checkCode: null,
           http: ctx.http,
           logger: ctx.logger,
-          ...transportStreamCallbacks,
+          ...makeTransportStreamCallbacks(),
           ...flashforgeClientOverrides,
         });
         handle.client = client;
@@ -874,7 +893,7 @@ export async function createKlipperWorker(
           apiKey: null,
           http: ctx.http,
           logger: ctx.logger,
-          ...transportStreamCallbacks,
+          ...makeTransportStreamCallbacks(),
           ...clientOverrides,
         });
         // Keep the apply-path invariant that `handle.config` describes the
@@ -1045,7 +1064,7 @@ export async function createKlipperWorker(
               checkCode: plaintext,
               http: ctx.http,
               logger: ctx.logger,
-              ...transportStreamCallbacks,
+              ...makeTransportStreamCallbacks(),
               ...flashforgeClientOverrides,
             })
           : new MoonrakerClient({
@@ -1053,7 +1072,7 @@ export async function createKlipperWorker(
               apiKey: plaintext,
               http: ctx.http,
               logger: ctx.logger,
-              ...transportStreamCallbacks,
+              ...makeTransportStreamCallbacks(),
               ...clientOverrides,
             });
       // Same invariant as the apply path and the unauth branch above:

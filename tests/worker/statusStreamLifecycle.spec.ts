@@ -392,6 +392,38 @@ describe("status stream channel lifecycle", () => {
     expect(opens[1].companyId).toBe(COMPANY_B);
   });
 
+  it("never emits outside an open channel while a config replay burst stops a started transport", async () => {
+    const { harness, worker, stream } = await bootDormantOnA();
+    await harness.executeTool<{ error?: string }>(
+      "klipper.upload_gcode",
+      { filename: "bracket.gcode", artifactId: ARTIFACT_ID },
+      { ...artifactCtx(), companyId: COMPANY_A, agentId: "agent-A", runId: "run-A" },
+    );
+    await waitFor(() => stream.some((c) => c.method === "emit"));
+
+    // Boot-replay-shaped burst: several distinct company rows alternate.
+    // The first apply stops the STARTED transport (whose stop() pushes a
+    // synchronous idle connection state); later applies churn dormant ones.
+    for (let i = 0; i < 3; i++) {
+      await worker.applyConfig(flashforgeConfig(mockB.baseUrl(), SERIAL_B), "configChanged");
+      await worker.applyConfig(flashforgeConfig(mockA.baseUrl(), SERIAL_A), "configChanged");
+    }
+    // Let any in-flight poll of the stopped client settle.
+    await new Promise((r) => setTimeout(r, 80));
+
+    // Every emit must sit between an open and the next close: an emit with
+    // no open channel has no company claim and the host drops it.
+    let open = false;
+    const unclaimed: number[] = [];
+    stream.forEach((c, idx) => {
+      if (c.method === "open") open = true;
+      else if (c.method === "close") open = false;
+      else if (c.method === "emit" && !open) unclaimed.push(idx);
+    });
+    expect(unclaimed).toEqual([]);
+    expect(stream.filter((c) => c.method === "close")).toHaveLength(1);
+  });
+
   it("spends ZERO extra worker→host calls for the whole channel lifecycle", async () => {
     const { harness, worker, stream, configGets, secretResolves } = await bootDormantOnA();
     await harness.executeTool<{ error?: string }>(

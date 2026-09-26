@@ -5,6 +5,20 @@ plugin follows semver against the host plugin API (PLA-526 keeps
 `package.json.version` and the manifest version in lockstep via the build
 `define`).
 
+## 0.2.12 — 2026-09-26
+
+### Fixed
+- **No stream-drop warning on activation.** When a config apply stopped a
+  started transport (for example during the per-company config replay at
+  worker start), the transport's `stop()` pushed a final `idle` connection
+  state through `ctx.streams.emit` with no dispatch claim. The host dropped
+  it fail-closed (`pin_mismatch`), logged a warning pair, and the worker
+  reset its pin mirror. The worker now closes the status channel before it
+  stops the transport, emits only while a channel is open, and ignores
+  callbacks from a stopped or replaced transport. Suppressed emits log
+  `klipper.stream.emit_suppressed` at debug level. The host drop is
+  unchanged.
+
 ## 0.2.11 — 2026-09-26
 
 ### Fixed
