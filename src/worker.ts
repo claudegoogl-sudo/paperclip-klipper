@@ -1122,6 +1122,17 @@ let activeWorker: KlipperWorker | null = null;
 let activeCtx: PluginContext | null = null;
 
 const plugin = definePlugin({
+  // One worker serves every company. Tools, data and actions read the
+  // dispatching company's config via `ctx.config.get()` inside the dispatch
+  // and rebuild the transport when its connection identity differs (see
+  // `ensureCredential`), so the worker-global applied config is only the
+  // boot/idle transport, never the authority for a dispatch. Declaring this
+  // lets the host replay every configured company's row; without it the
+  // SDK rejects each company whose config differs from the first
+  // (CROSS_TENANT_CONFIG, -32006) and the host logs a failed delivery on
+  // every activation.
+  multiCompanyConfig: true,
+
   async setup(ctx) {
     // Skip auto-start under Vitest so the scaffold tests don't try
     // to open a real WebSocket against a fake hostname. Tests that exercise
