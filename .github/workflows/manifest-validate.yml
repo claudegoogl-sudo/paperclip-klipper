@@ -21,6 +21,8 @@ on:
       - 'scripts/check-source-hygiene.mjs'
       - '.paperclip-sdk/**'
       - '.github/workflows/manifest-validate.yml'
+      - 'dist.sha256'
+      - 'scripts/write-dist-hashes.mjs'
   push:
     branches:
       - main
@@ -38,6 +40,8 @@ on:
       - 'scripts/check-source-hygiene.mjs'
       - '.paperclip-sdk/**'
       - '.github/workflows/manifest-validate.yml'
+      - 'dist.sha256'
+      - 'scripts/write-dist-hashes.mjs'
 
 jobs:
   validate-manifest:
@@ -63,6 +67,11 @@ jobs:
         run: pnpm run typecheck
       - name: Build manifest (and worker)
         run: pnpm run build
+      # The committed dist.sha256 must describe a clean build of this tree.
+      # If this fails, run `npm run build && npm run write:dist-hashes` after
+      # your LAST source commit and commit the updated dist.sha256.
+      - name: Committed dist.sha256 matches a fresh build
+        run: sha256sum -c dist.sha256
       - name: Unit tests (full suite)
         run: pnpm exec vitest run --config ./vitest.config.ts
       - name: Validate built manifest
