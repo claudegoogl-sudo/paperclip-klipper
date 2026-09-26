@@ -19,6 +19,18 @@ plugin follows semver against the host plugin API (PLA-526 keeps
   (for example a FlashForge transport while other companies keep the Moonraker
   default) hit this every time.
 
+### Security
+- **The page data and actions serve the held printer only to the company that
+  owns it.** One worker now holds every company's config, but it keeps one
+  printer client and one camera feed at a time. The worker records the owning
+  company: the company whose config was applied last, or whose dispatch last
+  credentialed the client. `status`, `connection`, `files`, `file_metadata`,
+  `config` and every print, file, upload and camera action check the
+  host-authorized company scope of the caller against that owner. Another
+  company (or an unscoped caller while an owner is set) gets the idle shape for
+  data keys and `prerequisite_missing` for actions. A denial logs
+  `klipper.tenancy.client_denied`.
+
 ### Unchanged
 - Manifest capabilities (5) and tools (3). Dispatch-time config resolution,
   credential handling and the tool gates are unchanged.
