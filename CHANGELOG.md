@@ -5,6 +5,16 @@ plugin follows semver against the host plugin API (PLA-526 keeps
 `package.json.version` and the manifest version in lockstep via the build
 `define`).
 
+## 0.2.13 — 2026-09-28
+
+- FlashForge: `get_printer_status` now surfaces the material station as
+  `objects.flashforge.materialStation` (`slotCnt`, `currentSlot`,
+  `currentLoadSlot`, `stateAction`, `stateStep`, `slotInfos[]` with `slotId`,
+  `hasFilament`, `materialName`, `materialColor`) and the external spool as
+  `objects.flashforge.indepMaterial`. Both are `null` when the printer does not
+  send them. Gated on `matlStationInfo` presence (Creator 5 does not send
+  `hasMatlStation`). Read-only; no new tool or capability.
+
 ## 0.2.12 — 2026-09-26
 
 ### Fixed

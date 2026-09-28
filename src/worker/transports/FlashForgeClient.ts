@@ -156,7 +156,93 @@ export interface FlashForgeDetail {
   targetPrintLayer?: number;
   doorStatus?: string;
   errorCode?: string;
+  /**
+   * Material station (Creator 5 / AD5X 4-slot IFS). Gate on PRESENCE of this
+   * object: the Creator 5 does not send `hasMatlStation`.
+   */
+  matlStationInfo?: FlashForgeMatlStationInfo;
+  /** Independent (external spool) feed info. */
+  indepMatlInfo?: FlashForgeIndepMatlInfo;
   [extra: string]: unknown;
+}
+
+export interface FlashForgeSlotInfo {
+  slotId?: number;
+  hasFilament?: boolean;
+  materialName?: string;
+  materialColor?: string;
+  [extra: string]: unknown;
+}
+
+export interface FlashForgeMatlStationInfo {
+  slotCnt?: number;
+  currentSlot?: number;
+  currentLoadSlot?: number;
+  stateAction?: number;
+  stateStep?: number;
+  slotInfos?: FlashForgeSlotInfo[];
+  [extra: string]: unknown;
+}
+
+export interface FlashForgeIndepMatlInfo {
+  materialName?: string;
+  materialColor?: string;
+  stateAction?: number;
+  stateStep?: number;
+  [extra: string]: unknown;
+}
+
+function isPlainObject(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
+function str(v: unknown): string {
+  return typeof v === "string" ? v : "";
+}
+
+/** Normalise `matlStationInfo`; `null` when absent/malformed. Never throws. */
+export function materialStationFromDetail(detail: FlashForgeDetail): {
+  slotCnt: number;
+  currentSlot: number;
+  currentLoadSlot: number;
+  stateAction: number;
+  stateStep: number;
+  slotInfos: Array<{ slotId: number; hasFilament: boolean; materialName: string; materialColor: string }>;
+} | null {
+  const m: unknown = detail.matlStationInfo;
+  if (!isPlainObject(m)) return null;
+  const rawSlots = Array.isArray(m.slotInfos) ? m.slotInfos : [];
+  const slotInfos = rawSlots.filter(isPlainObject).map((s) => ({
+    slotId: num(s.slotId) ?? 0,
+    hasFilament: s.hasFilament === true,
+    materialName: str(s.materialName),
+    materialColor: str(s.materialColor),
+  }));
+  return {
+    slotCnt: num(m.slotCnt) ?? slotInfos.length,
+    currentSlot: num(m.currentSlot) ?? 0,
+    currentLoadSlot: num(m.currentLoadSlot) ?? 0,
+    stateAction: num(m.stateAction) ?? 0,
+    stateStep: num(m.stateStep) ?? 0,
+    slotInfos,
+  };
+}
+
+/** Normalise `indepMatlInfo`; `null` when absent/malformed. Never throws. */
+export function indepMaterialFromDetail(detail: FlashForgeDetail): {
+  materialName: string;
+  materialColor: string;
+  stateAction: number;
+  stateStep: number;
+} | null {
+  const m: unknown = detail.indepMatlInfo;
+  if (!isPlainObject(m)) return null;
+  return {
+    materialName: str(m.materialName),
+    materialColor: str(m.materialColor),
+    stateAction: num(m.stateAction) ?? 0,
+    stateStep: num(m.stateStep) ?? 0,
+  };
 }
 
 /** `/detail` response envelope. */
@@ -282,6 +368,8 @@ export function detailToSnapshotObjects(
       estimatedTimeSeconds: num(detail.estimatedTime) ?? 0,
       doorOpen: detail.doorStatus === "open",
       errorCode: typeof detail.errorCode === "string" ? detail.errorCode : "",
+      materialStation: materialStationFromDetail(detail),
+      indepMaterial: indepMaterialFromDetail(detail),
     },
   };
   return objects;
