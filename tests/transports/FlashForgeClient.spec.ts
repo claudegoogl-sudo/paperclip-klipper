@@ -390,3 +390,76 @@ describe("FlashForge machine-state mapping", () => {
     expect(fallback.extruder).toMatchObject({ temperature: 25, target: 0 });
   });
 });
+
+
+// Host tool-result redactor key-name pattern (paperclip server/src/redaction.ts
+// SECRET_FIELD_NAME_PATTERN). Material fields must not match it.
+const HOST_SECRET_FIELD_RE =
+  /^[A-Za-z0-9_-]*(?:api[-_]?key|access[-_]?token|auth(?:_?token)?|token|authorization|bearer|secret|passwd|password|credential|jwt|private[-_]?key|cookie|connectionstring)[A-Za-z0-9_-]*$/i;
+
+const C5_STATION = {
+  slotCnt: 4,
+  currentSlot: 0,
+  currentLoadSlot: 0,
+  stateAction: 0,
+  stateStep: 0,
+  slotInfos: [
+    { slotId: 1, hasFilament: true, materialName: "PLA", materialColor: "#4CAAF8" },
+    { slotId: 2, hasFilament: true, materialName: "PETG", materialColor: "#FFFFFF" },
+    { slotId: 3, hasFilament: false, materialName: "", materialColor: "" },
+    { slotId: 4, hasFilament: true, materialName: "PLA", materialColor: "#000000" },
+  ],
+};
+
+describe("FlashForge material station (matlStationInfo)", () => {
+  it("maps the Creator 5 fixture to 4 slots with wire field names (no hasMatlStation flag)", () => {
+    const ff = detailToSnapshotObjects({ status: "ready", matlStationInfo: C5_STATION })
+      .flashforge as Record<string, any>;
+    expect(ff.materialStation).toEqual(C5_STATION);
+    expect(ff.materialStation.slotInfos).toHaveLength(4);
+    expect(ff.indepMaterial).toBeNull();
+  });
+
+  it("maps indepMatlInfo", () => {
+    const ff = detailToSnapshotObjects({
+      indepMatlInfo: { materialName: "TPU", materialColor: "#FF0000", stateAction: 1, stateStep: 2 },
+    }).flashforge as Record<string, any>;
+    expect(ff.indepMaterial).toEqual({
+      materialName: "TPU", materialColor: "#FF0000", stateAction: 1, stateStep: 2,
+    });
+    expect(ff.materialStation).toBeNull();
+  });
+
+  it("absent or malformed input yields null / safe entries, never throws", () => {
+    for (const bad of [undefined, null, 5, "x", [1, 2]]) {
+      const ff = detailToSnapshotObjects({ matlStationInfo: bad as any, indepMatlInfo: bad as any })
+        .flashforge as Record<string, any>;
+      expect(ff.materialStation).toBeNull();
+      expect(ff.indepMaterial).toBeNull();
+    }
+    const ff = detailToSnapshotObjects({
+      matlStationInfo: {
+        slotCnt: "4" as any,
+        slotInfos: [null, 7, "s", { slotId: "1", hasFilament: "true", materialName: 3, materialColor: null }] as any,
+      },
+    }).flashforge as Record<string, any>;
+    expect(ff.materialStation.slotCnt).toBe(1);
+    expect(ff.materialStation.slotInfos).toEqual([
+      { slotId: 0, hasFilament: false, materialName: "", materialColor: "" },
+    ]);
+    const ff2 = detailToSnapshotObjects({ matlStationInfo: { slotInfos: "nope" as any } })
+      .flashforge as Record<string, any>;
+    expect(ff2.materialStation.slotInfos).toEqual([]);
+  });
+
+  it("material fields survive the status redactor (key names are not secret-shaped)", () => {
+    const ff = detailToSnapshotObjects({ matlStationInfo: C5_STATION }).flashforge as Record<string, any>;
+    for (const k of ["materialStation", "indepMaterial", "slotInfos", "slotId", "hasFilament", "materialName", "materialColor"]) {
+      expect(HOST_SECRET_FIELD_RE.test(k)).toBe(false);
+    }
+    const json = JSON.stringify(ff);
+    expect(json).toContain('"materialName":"PLA"');
+    expect(json).toContain('"materialColor":"#4CAAF8"');
+    expect(json).not.toMatch(/REDACTED/);
+  });
+});
