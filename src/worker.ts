@@ -437,6 +437,8 @@ export async function createKlipperWorker(
   // KlipperWorker.getClientOwnerCompanyId).
   let clientOwnerCompanyId: string | null = null;
   let configOwnerCompanyId: string | null = null;
+  // Last applied config row per company (boot replay + operator saves).
+  const configsByCompany = new Map<string, KlipperConfig>();
 
   const invalidateTransportForApplication = (): void => {
     const client = handle.client;
@@ -483,6 +485,7 @@ export async function createKlipperWorker(
       // company's config (until a dispatch re-points them).
       clientOwnerCompanyId = companyId ?? null;
       configOwnerCompanyId = companyId ?? null;
+      if (companyId) configsByCompany.set(companyId, config as KlipperConfig);
 
       // ── Camera feed (independent of transport selection) ─────────────
       // Validated like the transport config (http(s), no userinfo, host
@@ -1132,6 +1135,7 @@ export async function createKlipperWorker(
       getClient: () => handle.client,
       getClientOwnerCompanyId: () => clientOwnerCompanyId,
       getConfigOwnerCompanyId: () => configOwnerCompanyId,
+      getConfigForCompany: (id: string) => configsByCompany.get(id) ?? null,
       getDegradedReason: () => credentialPendingReason,
       ensureCredential,
       camera: handle.camera,
