@@ -131,6 +131,12 @@ export interface RpcSurfaceOptions {
   /** Company whose applied config owns `config` + `camera` (same rule). */
   getConfigOwnerCompanyId?: () => string | null;
   /**
+   * The last config row applied for `companyId` (replay or save), or
+   * `null`. Lets the `config` data key answer per company even when the
+   * held config belongs to another company.
+   */
+  getConfigForCompany?: (companyId: string) => KlipperConfig | null;
+  /**
    * Why the transport is not running yet ("credential not resolved
    * yet"), or `null`. Merged into the status surfaces so the fail-closed
    * idle state is observable instead of a misleading gate error.
@@ -568,29 +574,46 @@ export function registerRpcSurface(
   // Always register the data keys (the page slot expects them to exist even
   // when the worker came up without config). When the client is absent we
   // return safe defaults so the UI can render the needs-config placeholder.
-  ctx.data.register("config", async (params: Record<string, unknown>) => {
-    if (!configAllows(dataScope(params))) {
-      // Another company's config: report unconfigured, leak nothing.
-      return { configured: false, moonrakerBaseUrl: null, cameraConfigured: false };
-    }
-    // Moonraker / unset transport: exactly the legacy two-field shape.
-    // FlashForge: same base fields plus the transport identity so the UI
-    // can name the configured printer host.
+  // Config snapshot for ONE company. Pure function of that company's own
+  // config row: it says whether that row validates and which transport it
+  // selects. It never exposes the held client or camera.
+  const describeConfig = (cfg: KlipperConfig, cameraConfigured: boolean) => {
+    const kind = cfg.transport === "flashforge" ? "flashforge" : "moonraker";
+    const ok =
+      kind === "moonraker"
+        ? cfg.moonrakerBaseUrl !== undefined &&
+          cfg.moonrakerBaseUrl !== "" &&
+          validateMoonrakerBaseUrl(cfg.moonrakerBaseUrl, cfg.moonrakerAllowedHosts).ok
+        : validateFlashForgeConfig(cfg).ok;
     const base = {
-      configured,
-      moonrakerBaseUrl:
-        configured && transportKind === "moonraker" ? config.moonrakerBaseUrl : null,
+      configured: ok,
+      moonrakerBaseUrl: ok && kind === "moonraker" ? cfg.moonrakerBaseUrl : null,
       /** Camera section availability (validated flashforgeCameraBaseUrl). */
-      cameraConfigured: camera !== null,
+      cameraConfigured,
     };
-    if (transportKind === "flashforge") {
-      return {
-        ...base,
-        transport: "flashforge" as const,
-        flashforgeBaseUrl: configured ? config.flashforgeBaseUrl ?? null : null,
-      };
+    if (kind === "flashforge") {
+      // No printer address in browser-facing data: the UI only needs to
+      // know the transport kind to pick the right setup copy.
+      return { ...base, transport: "flashforge" as const };
     }
     return base;
+  };
+
+  ctx.data.register("config", async (params: Record<string, unknown>) => {
+    const scope = dataScope(params);
+    if (!configAllows(scope)) {
+      // The held config belongs to another company (the boot replay applies
+      // every configured company's row; the last one wins the held slot).
+      // Answer from the CALLER's own applied row, if any: configured-ness
+      // is per company and must not depend on replay order. The camera
+      // feed stays with the held owner, so report it unavailable here.
+      const own = scope ? options.getConfigForCompany?.(scope) ?? null : null;
+      if (!own) {
+        return { configured: false, moonrakerBaseUrl: null, cameraConfigured: false };
+      }
+      return describeConfig(own, false);
+    }
+    return describeConfig(config, camera !== null);
   });
 
   /**

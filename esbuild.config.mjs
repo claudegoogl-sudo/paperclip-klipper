@@ -56,8 +56,51 @@ const manifestCtx = await esbuild.context({
   minifyWhitespace,
   define: { ...(presets.esbuild.manifest.define ?? {}), ...define },
 });
+// The host UI loader rewrites bare imports by exact text match on
+// ` from "<spec>"` / `import "<spec>"`. `minifyWhitespace` emits
+// `from"react"`, which that matcher misses: the blob import then fails with
+// "Failed to resolve module specifier" and the page slot stays a blank
+// placeholder. Re-insert the spaces for every host-provided specifier after
+// each UI build. `tests/uiBundleImports.spec.ts` guards the result.
+const HOST_UI_SPECIFIERS = [
+  "react",
+  "react/jsx-runtime",
+  "react-dom",
+  "react-dom/client",
+  "@paperclipai/plugin-sdk/ui",
+];
+const escapeRe = (v) => v.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&");
+function normalizeHostImports(code) {
+  const alt = HOST_UI_SPECIFIERS.map(escapeRe).join("|");
+  return code
+    .replace(new RegExp(`\\s*\\bfrom\\s*"(${alt})"`, "g"), ' from "$1"')
+    .replace(new RegExp(`\\bimport\\s*"(${alt})"`, "g"), 'import "$1"');
+}
+const hostImportRewritePlugin = {
+  name: "host-import-rewrite",
+  setup(build) {
+    build.onEnd(async (result) => {
+      if (result.errors.length > 0) return;
+      const { readFile, writeFile } = await import("node:fs/promises");
+      const { join } = await import("node:path");
+      const outdir = build.initialOptions.outdir;
+      const files = build.initialOptions.outfile
+        ? [build.initialOptions.outfile]
+        : (await import("node:fs")).readdirSync(outdir)
+            .filter((f) => f.endsWith(".js"))
+            .map((f) => join(outdir, f));
+      for (const f of files) {
+        const before = await readFile(f, "utf8");
+        const after = normalizeHostImports(before);
+        if (after !== before) await writeFile(f, after);
+      }
+    });
+  },
+};
+
 const uiCtx = await esbuild.context({
   ...presets.esbuild.ui,
+  plugins: [...(presets.esbuild.ui.plugins ?? []), hostImportRewritePlugin],
   sourcemap,
   minifyWhitespace,
   define: { ...(presets.esbuild.ui.define ?? {}), ...define },

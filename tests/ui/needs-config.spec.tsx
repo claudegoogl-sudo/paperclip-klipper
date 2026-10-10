@@ -51,6 +51,31 @@ afterEach(() => {
 });
 
 describe("Klipper page — needs-config placeholder", () => {
+  it("names FlashForge fields when transport=flashforge", async () => {
+    dataFn.mockImplementation((key: string) => {
+      if (key === "config") {
+        return makeDataResult({ configured: false, moonrakerBaseUrl: null, transport: "flashforge" });
+      }
+      return makeDataResult(null);
+    });
+    const { Page } = await import("../../src/ui/index.js");
+    render(
+      <Page
+        context={{
+          companyId: null,
+          companyPrefix: null,
+          projectId: null,
+          entityId: null,
+          entityType: null,
+          userId: null,
+        }}
+      />,
+    );
+    expect(screen.getByText("Configure FlashForge")).toBeTruthy();
+    expect(screen.queryByText("Configure Moonraker")).toBeNull();
+    expect(screen.getByText("flashforgeBaseUrl")).toBeTruthy();
+  });
+
   it("renders the needs-config placeholder when configured=false", async () => {
     dataFn.mockImplementation((key: string) => {
       if (key === "config") {

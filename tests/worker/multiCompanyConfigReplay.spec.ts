@@ -87,4 +87,41 @@ describe("multi-company config replay (host startup delivery)", () => {
     }
     expect(errors).toEqual([undefined, undefined, undefined, undefined]);
   });
+
+  it("config data key answers per company, independent of replay order", async () => {
+    const { host, call } = connect();
+    stop = () => host.stop();
+    await call("initialize", {
+      manifest,
+      config: {},
+      instanceInfo: { instanceId: "inst-test", hostVersion: "0.0.0-test" },
+      apiVersion: manifest.apiVersion,
+    });
+    const FF = "33333333-3333-4333-8333-333333333333";
+    const LATER = "44444444-4444-4444-8444-444444444444";
+    const NONE = "55555555-5555-4555-8555-555555555555";
+    // The FlashForge company replays first; a Moonraker default after it
+    // takes the held slot (the live boot order that left the page saying
+    // "Configure Moonraker").
+    await call("configChanged", { companyId: FF, config: FLASHFORGE });
+    await call("configChanged", { companyId: LATER, config: MOONRAKER_DEFAULT });
+
+    const ff = await call("getData", { key: "config", params: {}, companyId: FF });
+    expect(ff.error).toBeUndefined();
+    expect(ff.result).toEqual({
+      configured: true,
+      moonrakerBaseUrl: null,
+      cameraConfigured: false,
+      transport: "flashforge",
+    });
+    // No printer address reaches the browser-facing data.
+    expect(JSON.stringify(ff.result)).not.toContain("192.0.2.10");
+
+    const later = await call("getData", { key: "config", params: {}, companyId: LATER });
+    expect(later.result).toMatchObject({ configured: true, moonrakerBaseUrl: "http://printer.lan:7125" });
+
+    // A company with no config row still gets the unconfigured shape.
+    const none = await call("getData", { key: "config", params: {}, companyId: NONE });
+    expect(none.result).toEqual({ configured: false, moonrakerBaseUrl: null, cameraConfigured: false });
+  });
 });

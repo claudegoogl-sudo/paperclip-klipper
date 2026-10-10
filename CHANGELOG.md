@@ -5,6 +5,24 @@ plugin follows semver against the host plugin API (PLA-526 keeps
 `package.json.version` and the manifest version in lockstep via the build
 `define`).
 
+## 0.2.14 — 2026-10-10
+
+### Fixed
+- Printer page rendered blank: the whitespace-minified UI bundle emitted
+  `from"react"`, which the host UI loader's bare-import rewriter does not
+  match. The build now restores ` from "<spec>"` for every host-provided
+  specifier; a test guards the built `dist/ui/index.js`.
+- `config` data key reported `configured: false` for a correctly configured
+  FlashForge company whenever another company's config row replayed after it
+  (root cause: the config-owner tenancy check, not validation). The key now
+  answers from the calling company's own applied row.
+- Needs-config placeholder names the FlashForge fields when
+  `transport` is `flashforge` (was always "Configure Moonraker").
+
+### Security
+- `config` data key no longer returns `flashforgeBaseUrl`; no printer address
+  reaches browser-facing data.
+
 ## 0.2.13 — 2026-09-28
 
 - FlashForge: `get_printer_status` now surfaces the material station as

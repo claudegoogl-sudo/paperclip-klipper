@@ -110,7 +110,7 @@ describe("worker — flashforge transport happy paths (mock printer)", () => {
     return { harness, worker };
   }
 
-  it("AC1: config data key reports the flashforge transport and host", async () => {
+  it("AC1: config data key reports the flashforge transport, never the printer address", async () => {
     const { harness, worker } = await makeWorker();
     expect(worker.client?.kind).toBe("flashforge");
     const cfg = await harness.getData<{
@@ -123,8 +123,9 @@ describe("worker — flashforge transport happy paths (mock printer)", () => {
       configured: true,
       moonrakerBaseUrl: null,
       transport: "flashforge",
-      flashforgeBaseUrl: mock.baseUrl(),
     });
+    expect(cfg).not.toHaveProperty("flashforgeBaseUrl");
+    expect(JSON.stringify(cfg)).not.toContain(new URL(mock.baseUrl()).host);
   });
 
   it("AC2: upload_gcode delivers the artifact to the printer and reports the filename", async () => {

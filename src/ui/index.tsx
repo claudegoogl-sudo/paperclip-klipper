@@ -46,6 +46,8 @@ interface ConfigDataSnapshot {
   moonrakerBaseUrl: string | null;
   /** Camera section availability (validated flashforgeCameraBaseUrl). */
   cameraConfigured?: boolean;
+  /** Selected transport; absent = Moonraker (legacy shape). */
+  transport?: "flashforge";
 }
 
 /**
@@ -53,7 +55,8 @@ interface ConfigDataSnapshot {
  * Functional CTA only — UX polish is intentionally out of scope per the
  * issue brief.
  */
-function NeedsConfigPlaceholder() {
+function NeedsConfigPlaceholder({ transport }: { transport?: string }) {
+  const flashforge = transport === "flashforge";
   return (
     <main
       aria-label="Printer"
@@ -65,11 +68,25 @@ function NeedsConfigPlaceholder() {
         margin: "0 auto",
       }}
     >
-      <h1 style={{ margin: 0 }}>Configure Moonraker</h1>
-      <p style={{ margin: 0 }}>
-        Set <code>moonrakerBaseUrl</code> in plugin settings to connect this
-        printer.
-      </p>
+      {flashforge ? (
+        <>
+          <h1 style={{ margin: 0 }}>Configure FlashForge</h1>
+          <p style={{ margin: 0 }}>
+            Set <code>flashforgeBaseUrl</code>, <code>flashforgeSerialNumber</code>{" "}
+            and <code>flashforgeCheckCodeRef</code> in plugin settings to connect
+            this printer. If you set <code>flashforgeAllowedHosts</code>, it must
+            include the printer host.
+          </p>
+        </>
+      ) : (
+        <>
+          <h1 style={{ margin: 0 }}>Configure Moonraker</h1>
+          <p style={{ margin: 0 }}>
+            Set <code>moonrakerBaseUrl</code> in plugin settings to connect this
+            printer.
+          </p>
+        </>
+      )}
     </main>
   );
 }
@@ -128,7 +145,7 @@ export function Page(_props: PluginPageProps) {
   if (configData.data && configData.data.configured === false) {
     return (
       <ErrorBoundary>
-        <NeedsConfigPlaceholder />
+        <NeedsConfigPlaceholder transport={configData.data?.transport} />
       </ErrorBoundary>
     );
   }
