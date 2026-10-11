@@ -638,3 +638,68 @@ describe("LastCompletedJob (§6.4 §5)", () => {
     expect(screen.getByText(/Cancelled after 10m/)).toBeTruthy();
   });
 });
+
+// ── Cold first view: connecting -> connected settles without reload ─────
+describe("Page settle poll (cold first view after restart)", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  function wireStatus(initial: ConnectionStateSnapshot) {
+    let conn: ConnectionStateSnapshot = initial;
+    const refresh = vi.fn();
+    dataFn.mockImplementation((key: string) => {
+      if (key === "status") {
+        return { data: { connection: conn, objects: {} }, loading: false, error: null, refresh };
+      }
+      if (key === "config") return makeDataResult({ configured: true });
+      return makeDataResult([]);
+    });
+    return { refresh, set: (c: ConnectionStateSnapshot) => { conn = c; } };
+  }
+
+  it("re-fetches status while connecting and the banner clears once connected", async () => {
+    vi.useFakeTimers();
+    const { Page } = await import("../../src/ui/index.js");
+    const s = wireStatus({ state: "connecting", attempts: 1 });
+    const view = render(<Page context={PAGE_CONTEXT as never} />);
+    expect(screen.getByTestId("klipper-banner-connecting")).toBeTruthy();
+    expect(s.refresh).not.toHaveBeenCalled();
+    // transport settles; the next status answer says connected
+    s.set({ state: "connected", attempts: 0 });
+    s.refresh.mockImplementation(() => view.rerender(<Page context={PAGE_CONTEXT as never} />));
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(s.refresh).toHaveBeenCalledTimes(1);
+    expect(screen.queryByTestId("klipper-banner-connecting")).toBeNull();
+    // poll stops once connected
+    await vi.advanceTimersByTimeAsync(10000);
+    expect(s.refresh).toHaveBeenCalledTimes(1);
+  });
+
+  it("is bounded and stops on unmount", async () => {
+    vi.useFakeTimers();
+    const { Page, CONNECTING_POLL_MS, CONNECTING_POLL_MAX } = await import("../../src/ui/index.js");
+    const s = wireStatus({ state: "reconnecting", attempts: 2, nextRetryInMs: 1000 });
+    const view = render(<Page context={PAGE_CONTEXT as never} />);
+    await vi.advanceTimersByTimeAsync(CONNECTING_POLL_MS * (CONNECTING_POLL_MAX + 10));
+    expect(s.refresh).toHaveBeenCalledTimes(CONNECTING_POLL_MAX);
+    const s2 = wireStatus({ state: "connecting", attempts: 1 });
+    const v2 = render(<Page context={PAGE_CONTEXT as never} />);
+    view.unmount();
+    v2.unmount();
+    await vi.advanceTimersByTimeAsync(CONNECTING_POLL_MS * 5);
+    expect(s2.refresh).not.toHaveBeenCalled();
+  });
+
+  it("does not poll when connected or failed", async () => {
+    vi.useFakeTimers();
+    const { Page } = await import("../../src/ui/index.js");
+    for (const state of ["connected", "failed"] as const) {
+      const s = wireStatus({ state, attempts: 0 });
+      const v = render(<Page context={PAGE_CONTEXT as never} />);
+      await vi.advanceTimersByTimeAsync(10000);
+      expect(s.refresh).not.toHaveBeenCalled();
+      v.unmount();
+    }
+  });
+});

@@ -14,7 +14,7 @@
  *
  * No direct `fetch` from UI; no `ctx.assets` — thumbnails are deferred to v1.1.
  */
-import { useCallback } from "react";
+import { useCallback, useEffect, useRef } from "react";
 import {
   usePluginData,
   usePluginStream,
@@ -113,6 +113,16 @@ export function Page(_props: PluginPageProps) {
 
   const refreshStatus = useCallback(() => status.refresh(), [status]);
   const refreshFiles = useCallback(() => files.refresh(), [files]);
+
+  // Settle poll: re-fetch `status` while the transport is still coming up.
+  // The first page view after a worker restart brings the transport up and
+  // its first `status` answer says "connecting". The live stream cannot
+  // carry the later "connected" update (the host drops worker emits made
+  // outside an invocation), so without this poll the banner stays stale
+  // until a reload. Bounded: every CONNECTING_POLL_MS, at most
+  // CONNECTING_POLL_MAX tries, stops on any other state and on unmount.
+  const connectionState = connection?.state ?? null;
+  useConnectingPoll(connectionState, refreshStatus);
 
   const initialStatusLoading = status.loading && !status.data;
 
@@ -267,4 +277,30 @@ function UnconfiguredCard() {
       </span>
     </section>
   );
+}
+
+/** Poll interval while `connection.state` is connecting/reconnecting. */
+export const CONNECTING_POLL_MS = 2000;
+/** Upper bound on settle re-fetches per connecting episode (~60 s). */
+export const CONNECTING_POLL_MAX = 30;
+
+const SETTLING_STATES = new Set(["connecting", "reconnecting"]);
+
+function useConnectingPoll(state: string | null, refresh: () => void): void {
+  const refreshRef = useRef(refresh);
+  refreshRef.current = refresh;
+  const settling = state !== null && SETTLING_STATES.has(state);
+  useEffect(() => {
+    if (!settling) return;
+    let tries = 0;
+    const timer = setInterval(() => {
+      tries += 1;
+      if (tries > CONNECTING_POLL_MAX) {
+        clearInterval(timer);
+        return;
+      }
+      refreshRef.current();
+    }, CONNECTING_POLL_MS);
+    return () => clearInterval(timer);
+  }, [settling]);
 }
