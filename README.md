@@ -75,9 +75,20 @@ transport stays DORMANT: no WebSocket, no status poll, no request leaves the
 process. The status data key, the `klipper.get_printer_status` tool, and the
 health report all say `credential not resolved yet` during that window — an
 observable degraded state, not a misleading gate error. Background
-resolution (UI actions, the status poll, WS reconnects) is deliberately
+resolution (the status poll, WS reconnects, timers) is deliberately
 unsupported on this SDK generation; resolving there is exactly what the
 attribution rules forbid (see below).
+
+**Printer page (0.2.15+).** The page's `status` / `connection` / `files` /
+`file_metadata` data keys and the `refresh` action run inside a host call
+scoped to the viewing company. That scope authorizes the resolve the same
+way a tool dispatch does, and only for a secret bound to that company. So
+the page brings up the viewer's own transport from that company's own
+applied row: after a restart the page works with no agent dispatch first.
+A company with no applied row never triggers a transport or a resolve. A
+failed resolve stays fail-closed and is retried at most every 30 s per
+company (or at once after a config save). Watch `klipper.page_transport_ready`
+/ `klipper.page_transport_unavailable` in the plugin logs.
 
 > Why not resolve at config-apply or per request? Worker→host RPCs that run
 > with no (or with several concurrent) invocations in flight cannot be
@@ -147,7 +158,10 @@ set (e.g. `http://192.168.1.50:8080`, the printer's MJPG-Streamer endpoint):
   `camera_retry` refuse agent keys outright (`camera_close` is safe for any
   actor). Frames render on the page and go nowhere else — never to agent
   tools, data keys, or logs.
-- **One upstream, keep-latest.** The worker holds a single MJPG connection
+- **Per company (0.2.15+).** Each company gets a feed built from its own
+  config row; the boot replay order does not matter, and a company never
+  gets another company's frames.
+- **One upstream, keep-latest.** Each feed holds a single MJPG connection
   (the printer's camera is single-viewer) and a one-frame buffer: a slow
   viewer re-reads an older frame, frames in between are dropped. Memory is
   capped per feed (one frame + one parse buffer).

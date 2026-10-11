@@ -171,6 +171,18 @@ export interface RpcSurfaceOptions {
    */
   camera: CameraFeed | null;
   /**
+   * Per-company camera lookup. When present it REPLACES the single `camera`
+   * + config-owner rule: a scope only ever gets the feed built from its own
+   * applied row (boot replay order no longer decides camera ownership).
+   */
+  getCameraForCompany?: (companyId: string | null) => CameraFeed | null;
+  /**
+   * Converge the transport onto the viewing company's own applied row from
+   * inside the page's scoped data/action invocation (see worker.ts). Never
+   * throws; afterwards the normal tenancy gate decides what is served.
+   */
+  ensurePageTransport?: (companyId: string | null, method: string) => Promise<void>;
+  /**
    * Decompressed-g-code cap enforced during gunzip of gzip-magic artifacts in
    * `klipper.upload_gcode`. Defaults to {@link MAX_INFLATED_GCODE_BYTES}; tests
    * inject a tiny value to exercise the bomb-guard rejection without allocating
@@ -568,7 +580,27 @@ export function registerRpcSurface(
   const configAllows = (scope: string | null): boolean =>
     ownerAllows(options.getConfigOwnerCompanyId?.() ?? null, scope);
   const cameraFor = (scope: string | null): CameraFeed | null =>
-    camera && configAllows(scope) ? camera : null;
+    options.getCameraForCompany
+      ? options.getCameraForCompany(scope)
+      : camera && configAllows(scope)
+        ? camera
+        : null;
+  // Page reads converge the viewer's own transport first (no-op when it is
+  // already live, or when the caller has no applied row), then pass the
+  // unchanged tenancy gate.
+  const pageClientFor = async (
+    scope: string | null,
+    method: string,
+  ): Promise<PrinterTransport | null> => {
+    if (options.ensurePageTransport) {
+      try {
+        await options.ensurePageTransport(scope, method);
+      } catch {
+        // fail closed: the gate below serves nothing on a mismatch
+      }
+    }
+    return clientFor(scope);
+  };
 
   // ── ctx.data ────────────────────────────────────────────────────────────
   // Always register the data keys (the page slot expects them to exist even
@@ -601,19 +633,19 @@ export function registerRpcSurface(
 
   ctx.data.register("config", async (params: Record<string, unknown>) => {
     const scope = dataScope(params);
+    const cameraConfigured = cameraFor(scope) !== null;
     if (!configAllows(scope)) {
       // The held config belongs to another company (the boot replay applies
       // every configured company's row; the last one wins the held slot).
       // Answer from the CALLER's own applied row, if any: configured-ness
-      // is per company and must not depend on replay order. The camera
-      // feed stays with the held owner, so report it unavailable here.
+      // and the camera are per company and must not depend on replay order.
       const own = scope ? options.getConfigForCompany?.(scope) ?? null : null;
       if (!own) {
         return { configured: false, moonrakerBaseUrl: null, cameraConfigured: false };
       }
-      return describeConfig(own, false);
+      return describeConfig(own, cameraConfigured);
     }
-    return describeConfig(config, camera !== null);
+    return describeConfig(config, cameraConfigured);
   });
 
   /**
@@ -633,11 +665,12 @@ export function registerRpcSurface(
   // `usePluginData("status")` reads the cached snapshot. We do not block on
   // a fresh /printer/info call — the WS subscription / poll loop keeps the
   // snapshot warm and the UI can call the `refresh` action to force a
-  // refetch. This surface NEVER resolves credentials (it runs outside
-  // dispatches): before the first credentialed dispatch it reports the
-  // degraded reason instead.
+  // refetch. The page call runs inside a host `getData` invocation scoped
+  // to the viewing company; `pageClientFor` uses that scope to bring up the
+  // viewer's OWN transport (own row, own bound secret) when it is not the
+  // live one. If that fails, the degraded reason is reported instead.
   ctx.data.register("status", async (params: Record<string, unknown>) => {
-    const client = clientFor(dataScope(params));
+    const client = await pageClientFor(dataScope(params), "data:status");
     if (!client) {
       return {
         connection: { state: "idle", attempts: 0, configured: false },
@@ -648,20 +681,20 @@ export function registerRpcSurface(
   });
 
   ctx.data.register("connection", async (params: Record<string, unknown>) => {
-    const client = clientFor(dataScope(params));
+    const client = await pageClientFor(dataScope(params), "data:connection");
     if (!client) return { state: "idle", attempts: 0, configured: false };
     return client.getConnectionState();
   });
 
   ctx.data.register("files", async (params: Record<string, unknown>) => {
-    const client = clientFor(dataScope(params));
+    const client = await pageClientFor(dataScope(params), "data:files");
     if (!client) return [];
     const root = typeof params.root === "string" ? params.root : "gcodes";
     return client.listFiles(root);
   });
 
   ctx.data.register("file_metadata", async (params: Record<string, unknown>) => {
-    const client = clientFor(dataScope(params));
+    const client = await pageClientFor(dataScope(params), "data:file_metadata");
     if (!client) throw prerequisiteMissingError(prereqMessage);
     const filename = typeof params.filename === "string" ? params.filename : "";
     if (!filename) throw new Error("file_metadata requires `filename`");
@@ -677,7 +710,7 @@ export function registerRpcSurface(
   // credential only and NEVER resolve (the client throws its
   // "credential not resolved yet" error while the transport is dormant).
   ctx.actions.register("refresh", async (_params, actionCtx) => {
-    const client = clientFor(actionScope(actionCtx));
+    const client = await pageClientFor(actionScope(actionCtx), "action:refresh");
     if (!client) throw prerequisiteMissingError(prereqMessage);
     const info = await client.getPrinterInfo();
     return { ok: true, info, snapshot: client.getStatusSnapshot() };
