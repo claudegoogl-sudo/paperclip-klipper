@@ -5,6 +5,18 @@ plugin follows semver against the host plugin API (PLA-526 keeps
 `package.json.version` and the manifest version in lockstep via the build
 `define`).
 
+## 0.2.16 — 2026-10-11
+
+### Fixed
+- First printer-page view after a worker restart kept the "Connecting to
+  printer…" banner until a reload. The first `status` answer comes while the
+  page's own call is still bringing the transport up, and the live stream
+  cannot deliver the later "connected" update (the host drops worker stream
+  emits made outside an invocation). The page now re-fetches `status` every
+  2 s while `connection.state` is `connecting`/`reconnecting`, at most 30
+  times, and stops on any other state or on unmount. UI-only; no worker,
+  tenancy, secret or camera change.
+
 ## 0.2.15 — 2026-10-11
 
 ### Fixed
