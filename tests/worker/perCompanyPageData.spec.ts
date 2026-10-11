@@ -137,6 +137,25 @@ describe("per-company page data survives a boot replay in any order", () => {
     }
   });
 
+  it("upload_gcode action: lands on the viewer's OWN printer; a company without a row reaches no printer", async () => {
+    const { harness, worker } = await bootFlashForgeFirst();
+    try {
+      const gcodeBase64 = Buffer.from("G28\n").toString("base64");
+      // Wrong company: no row of its own -> refused, nothing reaches any printer.
+      await expect(
+        harness.performAction("upload_gcode", { filename: "x.gcode", gcodeBase64 }, board(NONE)),
+      ).rejects.toThrow();
+      expect(moon.uploadedFiles).toHaveLength(0);
+      // Own company: the page's scoped status read converges the viewer's
+      // transport (as on the live page), then the upload lands on it.
+      await harness.getData("status", { companyId: MOON_1 });
+      await harness.performAction("upload_gcode", { filename: "benchy.gcode", gcodeBase64 }, board(MOON_1));
+      expect(moon.uploadedFiles.map((f) => f.filename)).toEqual(["benchy.gcode"]);
+    } finally {
+      worker.client?.stop();
+    }
+  });
+
   it("A1: one company never gets another company's frames", async () => {
     const { fn } = stubCameraFetch({ "127.0.0.1": 0x11, "camera-b.test": 0x22 });
     globalThis.fetch = fn as unknown as typeof fetch;

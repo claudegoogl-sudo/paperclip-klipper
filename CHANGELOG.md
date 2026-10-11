@@ -5,6 +5,14 @@ plugin follows semver against the host plugin API (PLA-526 keeps
 `package.json.version` and the manifest version in lockstep via the build
 `define`).
 
+## 0.2.17 — 2026-10-11
+
+- test(worker): pin tenancy for the `upload_gcode` page action. A company
+  without its own printer row is refused and no printer receives bytes; the
+  viewer's own company upload lands on its own Moonraker. The action itself
+  (shared upload core with `klipper.upload_gcode`, base64 cap, filename/path
+  backstops, gzip guard) has shipped since 0.2.7; no runtime change.
+
 ## 0.2.16 — 2026-10-11
 
 ### Fixed
