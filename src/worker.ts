@@ -439,6 +439,83 @@ export async function createKlipperWorker(
   let configOwnerCompanyId: string | null = null;
   // Last applied config row per company (boot replay + operator saves).
   const configsByCompany = new Map<string, KlipperConfig>();
+  // Camera feed per company (key = companyId; UNSCOPED_CAMERA_KEY for an
+  // instance-level apply with no company). Bounded to companies whose last
+  // applied row carries a valid camera URL: a row without one deletes the
+  // entry and disposes its feed. Each feed self-closes when idle.
+  type CameraSlot = { feed: CameraFeed; fingerprint: string };
+  const camerasByCompany = new Map<string, CameraSlot>();
+  const UNSCOPED_CAMERA_KEY = "";
+
+  /**
+   * Converge one company's camera slot onto its newly applied row. Returns
+   * the slot to keep (the previous one when the identity is unchanged) or
+   * `null` when the row has no usable camera. Disposes a replaced feed.
+   */
+  const convergeCamera = (
+    config: Partial<KlipperConfig>,
+    source: KlipperConfigSource,
+    prev: CameraSlot | null,
+  ): CameraSlot | null => {
+    const camRaw = config.flashforgeCameraBaseUrl;
+    const fingerprint = JSON.stringify([
+      "camera",
+      camRaw ?? null,
+      [...(config.flashforgeCameraAllowedHosts ?? [])].sort(),
+    ]);
+    if (camRaw === undefined || camRaw === null || camRaw === "") {
+      if (prev) {
+        prev.feed.dispose();
+        ctx.logger.info("paperclip-klipper camera removed from config — camera section disabled", {
+          pluginId: "platform.klipper",
+          source,
+        });
+      }
+      return null;
+    }
+    // Same camera identity — keep the feed (per-company replay burst).
+    if (prev && prev.fingerprint === fingerprint) return prev;
+    const ffHost = (() => {
+      try {
+        return config.flashforgeBaseUrl ? new URL(config.flashforgeBaseUrl).host : null;
+      } catch {
+        return null;
+      }
+    })();
+    const validated = validateCameraBaseUrl(camRaw, config.flashforgeCameraAllowedHosts, ffHost);
+    if (prev) prev.feed.dispose();
+    if (!validated.ok) {
+      ctx.logger.warn(
+        "paperclip-klipper rejected flashforgeCameraBaseUrl — camera section disabled; the transport is unaffected",
+        { pluginId: "platform.klipper", source, reason: validated.reason, host: validated.host },
+      );
+      return null;
+    }
+    const feed = new CameraFeed({ baseUrl: validated.url, logger: ctx.logger });
+    ctx.logger.info("paperclip-klipper camera feed configured — opens on first board viewer", {
+      pluginId: "platform.klipper",
+      source,
+      cameraHost: validated.host,
+      cameraCompanies: camerasByCompany.size + (prev ? 0 : 1),
+    });
+    return { feed, fingerprint };
+  };
+
+  /**
+   * Camera feed for a caller scope. A company only ever gets the feed built
+   * from ITS OWN row. The unscoped (instance-level) feed is served only
+   * while no company owns the applied config — the pre-tenancy contract.
+   */
+  const cameraForCompany = (scope: string | null): CameraFeed | null => {
+    if (scope) {
+      const own = camerasByCompany.get(scope);
+      if (own) return own.feed;
+    }
+    if (configOwnerCompanyId === null) {
+      return camerasByCompany.get(UNSCOPED_CAMERA_KEY)?.feed ?? null;
+    }
+    return null;
+  };
 
   const invalidateTransportForApplication = (): void => {
     const client = handle.client;
@@ -485,66 +562,27 @@ export async function createKlipperWorker(
       // company's config (until a dispatch re-points them).
       clientOwnerCompanyId = companyId ?? null;
       configOwnerCompanyId = companyId ?? null;
-      if (companyId) configsByCompany.set(companyId, config as KlipperConfig);
+      if (companyId) {
+        configsByCompany.set(companyId, config as KlipperConfig);
+        pageEnsureFailedAt.delete(companyId);
+      }
 
       // ── Camera feed (independent of transport selection) ─────────────
+      // One feed PER COMPANY, built from that company's own row, so the
+      // boot replay order never decides which company owns the camera.
       // Validated like the transport config (http(s), no userinfo, host
       // allowlist defaulting to the FlashForge host) and additionally
       // scoped to /?action=stream. A camera config problem degrades ONLY
-      // the camera section — the transport client is untouched.
+      // that company's camera section — the transport client is untouched.
       {
-        const camRaw = config.flashforgeCameraBaseUrl;
-        const camFingerprint = JSON.stringify([
-          "camera",
-          camRaw ?? null,
-          [...(config.flashforgeCameraAllowedHosts ?? [])].sort(),
-        ]);
-        const prevCamFingerprint = handle.camera ? handle.cameraFingerprint : null;
-        if (camRaw === undefined || camRaw === null || camRaw === "") {
-          if (handle.camera) {
-            handle.camera.dispose();
-            handle.camera = null;
-            handle.cameraFingerprint = null;
-            ctx.logger.info("paperclip-klipper camera removed from config — camera section disabled", {
-              pluginId: "platform.klipper",
-              source,
-            });
-          }
-        } else if (handle.camera && prevCamFingerprint === camFingerprint) {
-          // Same camera identity — keep the feed (per-company replay burst).
-        } else {
-          const ffHost = (() => {
-            try {
-              return config.flashforgeBaseUrl ? new URL(config.flashforgeBaseUrl).host : null;
-            } catch {
-              return null;
-            }
-          })();
-          const validated = validateCameraBaseUrl(camRaw, config.flashforgeCameraAllowedHosts, ffHost);
-          if (!validated.ok) {
-            if (handle.camera) {
-              handle.camera.dispose();
-              handle.camera = null;
-              handle.cameraFingerprint = null;
-            }
-            ctx.logger.warn(
-              "paperclip-klipper rejected flashforgeCameraBaseUrl — camera section disabled; the transport is unaffected",
-              { pluginId: "platform.klipper", source, reason: validated.reason, host: validated.host },
-            );
-          } else {
-            if (handle.camera) handle.camera.dispose();
-            handle.camera = new CameraFeed({
-              baseUrl: validated.url,
-              logger: ctx.logger,
-            });
-            handle.cameraFingerprint = camFingerprint;
-            ctx.logger.info("paperclip-klipper camera feed configured — opens on first board viewer", {
-              pluginId: "platform.klipper",
-              source,
-              cameraHost: validated.host,
-            });
-          }
-        }
+        const key = companyId ?? UNSCOPED_CAMERA_KEY;
+        const next = convergeCamera(config, source, camerasByCompany.get(key) ?? null);
+        if (next) camerasByCompany.set(key, next);
+        else camerasByCompany.delete(key);
+        // Back-compat view: the last-applied company's feed (same object as
+        // the map entry — never a second upstream connection).
+        handle.camera = next?.feed ?? null;
+        handle.cameraFingerprint = next?.fingerprint ?? null;
       }
       // Fingerprint the PREVIOUS connection identity (kind-aware: a live
       // flashforge client must be compared with the flashforge fingerprint,
@@ -1123,6 +1161,67 @@ export async function createKlipperWorker(
     return { ok: true };
   }
 
+  // ── Page-data transport (board printer page) ─────────────────────────
+  // The page's data keys run inside a host `getData` invocation that is
+  // scoped to the viewing company (host-authorized bridge scope). That
+  // invocation is what authorizes `ctx.secrets.resolve`, exactly like a tool
+  // dispatch: the host attaches the invocation's company and resolves ONLY a
+  // secret bound to that company. So the page converges the transport onto
+  // the viewer's OWN last-applied row (never another company's) without
+  // waiting for an agent tool dispatch.
+  const PAGE_RETRY_AFTER_FAILURE_MS = 30_000;
+  const pageEnsureInFlight = new Map<string, Promise<void>>();
+  const pageEnsureFailedAt = new Map<string, number>();
+
+  async function ensurePageTransport(scope: string | null, method: string): Promise<void> {
+    if (!scope) return;
+    const own = configsByCompany.get(scope);
+    if (!own) return; // no row for this company: nothing to serve
+    if (
+      clientOwnerCompanyId === scope &&
+      handle.client !== null &&
+      transportStarted &&
+      credentialPendingReason === null
+    ) {
+      return; // already this company's live transport
+    }
+    const failedAt = pageEnsureFailedAt.get(scope);
+    if (failedAt !== undefined && Date.now() - failedAt < PAGE_RETRY_AFTER_FAILURE_MS) return;
+    const inflight = pageEnsureInFlight.get(scope);
+    if (inflight) return inflight;
+    const run = (async () => {
+      const previousOwner = clientOwnerCompanyId;
+      try {
+        const res = await ensureCredential(own, method, scope);
+        if (res.ok) {
+          pageEnsureFailedAt.delete(scope);
+          ctx.logger.info("klipper.page_transport_ready", {
+            pluginId: "platform.klipper",
+            method,
+            transport: handle.client?.kind ?? null,
+            ownerChanged: previousOwner !== scope,
+          });
+        } else {
+          pageEnsureFailedAt.set(scope, Date.now());
+          ctx.logger.warn("klipper.page_transport_unavailable", {
+            pluginId: "platform.klipper",
+            method,
+            reason: res.reason,
+          });
+        }
+      } catch (err) {
+        pageEnsureFailedAt.set(scope, Date.now());
+        ctx.logger.warn("klipper.page_transport_unavailable", {
+          pluginId: "platform.klipper",
+          method,
+          reason: err instanceof Error ? err.message : String(err),
+        });
+      }
+    })().finally(() => pageEnsureInFlight.delete(scope));
+    pageEnsureInFlight.set(scope, run);
+    return run;
+  }
+
   /**
    * Options for the RPC surface registration. Handlers read the CURRENT
    * client through the `getClient` thunk (an in-dispatch convergence can
@@ -1138,7 +1237,9 @@ export async function createKlipperWorker(
       getConfigForCompany: (id: string) => configsByCompany.get(id) ?? null,
       getDegradedReason: () => credentialPendingReason,
       ensureCredential,
+      ensurePageTransport,
       camera: handle.camera,
+      getCameraForCompany: cameraForCompany,
     };
   }
 

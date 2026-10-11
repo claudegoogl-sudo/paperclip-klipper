@@ -5,6 +5,38 @@ plugin follows semver against the host plugin API (PLA-526 keeps
 `package.json.version` and the manifest version in lockstep via the build
 `define`).
 
+## 0.2.15 — 2026-10-11
+
+### Fixed
+- Printer page of a company lost its camera, status and file list after
+  every worker restart when other companies' config rows replayed after it
+  (the boot replay applies every company's row; the last one owned the
+  single camera feed and the transport). Now:
+  - The camera feed is per company, built from that company's own row.
+    A company only ever gets its own feed; a company without a camera URL
+    still gets "camera not configured". Feeds still self-close when idle.
+  - The page's `status`, `connection`, `files`, `file_metadata` data keys
+    and the `refresh` action bring up the viewing company's own transport
+    from its own applied row inside the host-scoped page call. No agent
+    tool dispatch is needed first. The secret ref resolves under the
+    viewing company's invocation scope (only a secret bound to that
+    company). A failed resolve stays fail-closed and is retried at most
+    every 30 s per company, or at once after a config save.
+  - New log lines: `klipper.page_transport_ready`,
+    `klipper.page_transport_unavailable`.
+
+### Security
+- Tenancy gate unchanged: data and actions still serve the held client only
+  to its owner company (`klipper.tenancy.client_denied`). A company with no
+  applied row never triggers a transport or a secret resolve. Camera scope
+  pin (`/?action=stream`) and host allowlist unchanged.
+
+### Known limit
+- The worker still holds ONE live transport. Two companies that view their
+  printer pages at the same time re-point it in turn (each poll is correct
+  for its company, but the connection is rebuilt). Same as tool dispatches
+  today.
+
 ## 0.2.14 — 2026-10-10
 
 ### Fixed
